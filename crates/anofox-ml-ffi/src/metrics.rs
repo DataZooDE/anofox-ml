@@ -13,7 +13,7 @@ use m::{Average, ClassificationOptions, MultiClass, ZeroDivision};
 use ndarray::{Array1, Array2};
 use serde::Deserialize;
 
-use crate::{err, str_arg};
+use crate::{encode_labels, err, str_arg, strings};
 
 /// Options shared by the metrics (all optional, sklearn defaults).
 #[derive(Deserialize, Default)]
@@ -285,6 +285,104 @@ pub unsafe extern "C" fn anofox_ml_metric(
     }
 }
 
+/// Metrics that compare two label vectors, which also accept string labels.
+const LABEL_METRICS: &[&str] = &[
+    "accuracy",
+    "balanced_accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "fbeta",
+    "matthews_corrcoef",
+    "cohen_kappa",
+    "adjusted_rand",
+    "normalized_mutual_info",
+];
+
+/// [`metric`] on string labels: both sides are coded by the sorted union of
+/// their labels, and string `pos_label` / `labels` options are translated.
+pub(crate) fn label_metric(
+    name: &str,
+    options: &str,
+    y_true: &[&str],
+    y_pred: &[&str],
+    w: Option<Array1<f64>>,
+) -> Result<f64, String> {
+    if !LABEL_METRICS.contains(&name) {
+        return Err(format!("{name} needs numeric values, not labels"));
+    }
+    let all: Vec<&str> = y_true.iter().chain(y_pred).copied().collect();
+    let (labels, codes) = encode_labels(&all);
+    let code = |v: &serde_json::Value| -> Result<serde_json::Value, String> {
+        let s = v
+            .as_str()
+            .ok_or_else(|| format!("with string labels, {v} must be a label string"))?;
+        labels
+            .binary_search_by(|l| l.as_str().cmp(s))
+            .map(|i| serde_json::json!(i))
+            .map_err(|_| format!("label '{s}' does not occur"))
+    };
+    let mut o: serde_json::Value = if options.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(options).map_err(|e| format!("invalid options JSON: {e}"))?
+    };
+    if let Some(obj) = o.as_object_mut() {
+        if let Some(p) = obj.get("pos_label") {
+            let c = code(p)?;
+            obj.insert("pos_label".into(), c);
+        }
+        if let Some(serde_json::Value::Array(ls)) = obj.get("labels") {
+            let c = ls.iter().map(code).collect::<Result<Vec<_>, _>>()?;
+            obj.insert("labels".into(), serde_json::Value::Array(c));
+        }
+    }
+    let n = y_true.len();
+    let yt = Array1::from(codes[..n].to_vec());
+    let yp = Array2::from_shape_vec((n, 1), codes[n..].to_vec()).map_err(|e| e.to_string())?;
+    metric(name, &o.to_string(), yt, yp, w)
+}
+
+/// [`anofox_ml_metric`] for string labels: `y_true` and `y_pred` hold `n`
+/// NUL-terminated strings each.
+///
+/// # Safety
+/// As [`anofox_ml_metric`], with string arrays.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_metric_labels(
+    name: *const c_char,
+    options: *const c_char,
+    y_true: *const *const c_char,
+    y_pred: *const *const c_char,
+    n: usize,
+    w: *const f64,
+    out: *mut f64,
+) -> *mut c_char {
+    let run = || -> Result<f64, String> {
+        let name = str_arg(name, "metric name")?;
+        let options = if options.is_null() {
+            ""
+        } else {
+            str_arg(options, "options")?
+        };
+        if n == 0 {
+            return Err("empty input".into());
+        }
+        let yt = strings(y_true, n, "y_true")?;
+        let yp = strings(y_pred, n, "y_pred")?;
+        let w = (!w.is_null()).then(|| Array1::from(std::slice::from_raw_parts(w, n).to_vec()));
+        label_metric(name, options, &yt, &yp, w)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(v)) => {
+            *out = v;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while computing a metric"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +435,26 @@ mod tests {
         assert!(e.contains("needs 1 value"), "{e}");
         let e = metric("mse", "", array![1.0], col(array![1.0]), Some(array![1.0])).unwrap_err();
         assert!(e.contains("does not accept a weight"), "{e}");
+    }
+
+    #[test]
+    fn string_labels_are_coded_consistently() {
+        let yt = ["cat", "dog", "dog", "bird"];
+        let yp = ["cat", "dog", "cat", "bird"];
+        assert_eq!(label_metric("accuracy", "", &yt, &yp, None).unwrap(), 0.75);
+        // f1 of 'dog' as the positive label: precision 1, recall 1/2.
+        let f1 = label_metric(
+            "f1",
+            r#"{"average": "macro", "labels": ["dog"]}"#,
+            &yt,
+            &yp,
+            None,
+        )
+        .unwrap();
+        assert!((f1 - 2.0 / 3.0).abs() < 1e-12, "{f1}");
+        let e = label_metric("f1", r#"{"pos_label": "fish"}"#, &yt, &yp, None).unwrap_err();
+        assert!(e.contains("does not occur"), "{e}");
+        let e = label_metric("r2", "", &yt, &yp, None).unwrap_err();
+        assert!(e.contains("numeric"), "{e}");
     }
 }

@@ -149,6 +149,10 @@ SELECT ml_roc_auc(churned, ml_predict_proba(model, [x1, x2])[2]) AS auc,
        ml_f1(churned, ml_predict(model, [x1, x2])) AS f1
 FROM churn_model, customers;
 
+-- string class labels
+CREATE TABLE iris_model AS SELECT ml_fit_agg('RandomForestClassifier', species, [sepal_length, petal_width]) AS model FROM iris;
+SELECT ml_accuracy(species, ml_predict_label(model, [sepal_length, petal_width])) FROM iris, iris_model;
+
 -- unsupervised fit: standardise features, then transform
 CREATE TABLE scaler AS SELECT ml_fit_agg('StandardScaler', [price, promo]) AS model FROM train;
 SELECT ml_transform(model, [price, promo]) FROM train, scaler;
@@ -170,9 +174,10 @@ SELECT kind, default_params FROM ml_estimators();
 | Function | Description |
 |---|---|
 | `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
-| `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
+| `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `y` is `DOUBLE`, or `VARCHAR` class labels for classifiers. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
 | `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
-| `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`) |
+| `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
+| `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
 | `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`) |
@@ -180,7 +185,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
 | `ml_outlier_score_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
 | `ml_fit_transform_agg(kind, [y,] [x1, x2, …] [, params [, weight]])` | Aggregate: fit on the group and return each row's output (`DOUBLE[][]`): the training embedding of t-SNE, Isomap, LLE and MDS, TargetEncoder's cross-fitted encoding, or `transform` of the training rows |
-| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version` and `crate_version` |
+| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version`, `crate_version` and `labels` (string class labels) |
 | `ml_model_fitted(model)` | The fitted state as JSON: coefficients, centroids, components, trees, … (arrays as `{"v", "dim", "data"}`, e.g. `json_extract(ml_model_fitted(m), '$.coef.data')`) |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
@@ -192,7 +197,7 @@ One-shot workflows over a table (name as a string) and its columns. They keep ev
 | Macro | Adds |
 |---|---|
 | `ml_fit_predict_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`: one model per group, fitted on the rows with a target, predicting every row (also those without one) |
-| `ml_fit_predict_proba_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`, `proba DOUBLE[]` and `classes` |
+| `ml_fit_predict_proba_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`, `label`, `proba DOUBLE[]`, `classes` and `labels` |
 | `ml_cross_val_predict_by(source, group_col, id_col, y_col, x_cols, kind [, params := …, method := 'kfold', options := '{}'])` | `split` and the out-of-fold `prediction` of every labelled row (methods as in `ml_cv_splits_agg`) |
 | `ml_cluster_by(source, group_col, id_col, x_cols, kind [, params := …])` | `cluster` |
 | `ml_outlier_score_by(source, group_col, id_col, x_cols, kind [, params := …])` | `outlier_score` |
@@ -221,8 +226,8 @@ Aggregates over `(y_true, y_pred)`: no model is needed, so they score any predic
 | Function | Description |
 |---|---|
 | `ml_r2`, `ml_mse`, `ml_rmse`, `ml_mae`, `ml_mape`, `ml_median_absolute_error`, `ml_max_error`, `ml_explained_variance`, `ml_mean_squared_log_error` `(y, y_pred)` | Regression |
-| `ml_accuracy`, `ml_precision`, `ml_recall`, `ml_f1`, `ml_fbeta` `(y, y_pred [, options [, weight]])` | Classification on labels. `options` JSON: `average` (`binary` default, `macro`, `micro`, `weighted`), `pos_label`, `zero_division` (`0`, `1`, `"nan"`), `labels`, `beta` |
-| `ml_balanced_accuracy`, `ml_matthews_corrcoef` (binary), `ml_cohen_kappa` `(y, y_pred)` | Classification on labels |
+| `ml_accuracy`, `ml_precision`, `ml_recall`, `ml_f1`, `ml_fbeta` `(y, y_pred [, options [, weight]])` | Classification on labels (`DOUBLE` or `VARCHAR`). `options` JSON: `average` (`binary` default, `macro`, `micro`, `weighted`), `pos_label`, `zero_division` (`0`, `1`, `"nan"`), `labels`, `beta` |
+| `ml_balanced_accuracy`, `ml_matthews_corrcoef` (binary), `ml_cohen_kappa` `(y, y_pred)` | Classification on labels (`DOUBLE` or `VARCHAR`) |
 | `ml_roc_auc`, `ml_log_loss` `(y, score DOUBLE \| proba DOUBLE[] [, options [, weight]])` | Binary score or per-class probabilities (columns in sorted label order, or `labels`). ROC AUC options: `multi_class` (`ovr`, `ovo`), `average` |
 | `ml_brier_score(y, p [, options [, weight]])`, `ml_average_precision(y, score)` | Binary probabilities and scores |
 | `ml_adjusted_rand`, `ml_normalized_mutual_info` `(labels_true, labels_pred)`, `ml_silhouette(x DOUBLE[], label)` | Clustering |
@@ -296,7 +301,7 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 - **NULLs:** rows with a NULL target, weight, feature list or NULL value inside the feature list are skipped when fitting, and predict NULL. The per-row aggregates return a NULL entry for such rows.
 - **Weights:** kinds without weighted fitting reject a `weight` with an error naming the kind.
 - **Row order:** `ml_cluster_agg`, `ml_outlier_score_agg` and `ml_fit_transform_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
-- **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`.
+- **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`. With `VARCHAR` targets, the sorted distinct labels are stored as `labels`, the model learns their index, and `classes` / `ml_predict_proba` columns follow the label order.
 - **Feature count:** predicting with a feature list of the wrong length is an error.
 - **Parallelism:** DuckDB parallelises across groups. Each fit currently runs single-threaded inside a DuckDB worker, so an ungrouped fit uses one core. [#7](https://github.com/DataZooDE/anofox-ml/issues/7) proposes letting a single fit use the idle cores.
 - **Determinism:** estimators with randomness take a `seed` parameter with a fixed default, so the same query gives the same model.

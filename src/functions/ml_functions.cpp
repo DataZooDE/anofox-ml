@@ -119,7 +119,7 @@ void EstimatorsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 }
 
 //===--------------------------------------------------------------------===//
-// ml_fit_agg(kind VARCHAR, y DOUBLE, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB
+// ml_fit_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB
 // ml_fit_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB (unsupervised)
 //===--------------------------------------------------------------------===//
 struct FitState {
@@ -133,6 +133,8 @@ struct FitState {
     std::vector<double> *x;
     std::vector<double> *y;
     std::vector<double> *w;
+    std::vector<std::string> *labels; // string targets (has_labels)
+    bool has_labels;
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -150,6 +152,8 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.x = new std::vector<double>();
     s.y = new std::vector<double>();
     s.w = new std::vector<double>();
+    s.labels = new std::vector<std::string>();
+    s.has_labels = false;
     s.used = new std::vector<uint8_t>();
 }
 
@@ -162,12 +166,13 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.x;
         delete s.y;
         delete s.w;
+        delete s.labels;
         delete s.used;
     }
 }
 
-// Inputs: kind, [y,] x [, params [, weight]].
-template <bool HAS_Y, bool HAS_W = false>
+// Inputs: kind, [y,] x [, params [, weight]]; y is a string label when LABELS.
+template <bool HAS_Y, bool HAS_W = false, bool LABELS = false>
 void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
     UnifiedVectorFormat kind_data, y_data, x_data, params_data, w_data, sdata;
@@ -213,6 +218,7 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
             s.initialized = true;
             s.has_y = HAS_Y;
             s.has_w = HAS_W;
+            s.has_labels = LABELS;
             *s.kind = kinds[ki].GetString();
             if (has_params) {
                 auto pi = params_data.sel->get_index(i);
@@ -229,7 +235,9 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
         for (idx_t j = 0; j < entry.length; j++) {
             s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
         }
-        if (HAS_Y) {
+        if (HAS_Y && LABELS) {
+            s.labels->push_back(UnifiedVectorFormat::GetData<string_t>(y_data)[yi].GetString());
+        } else if (HAS_Y) {
             s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
         }
         if (HAS_W) {
@@ -254,6 +262,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
             tgt.initialized = true;
             tgt.has_y = src.has_y;
             tgt.has_w = src.has_w;
+            tgt.has_labels = src.has_labels;
             *tgt.kind = *src.kind;
             *tgt.params = *src.params;
             tgt.n_cols = src.n_cols;
@@ -263,6 +272,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         tgt.x->insert(tgt.x->end(), src.x->begin(), src.x->end());
         tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
         tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
+        tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
         tgt.n_rows += src.n_rows;
     }
 }
@@ -278,9 +288,21 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
         }
         CaptureUse("ml_fit_agg");
         AnofoxMlBytes blob {nullptr, 0};
-        Check(anofox_ml_fit(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
-                            s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr, &blob),
-              "ml_fit_agg");
+        const double *w = s.has_w ? s.w->data() : nullptr;
+        if (s.has_labels) {
+            std::vector<const char *> labels;
+            labels.reserve(s.labels->size());
+            for (const auto &l : *s.labels) {
+                labels.push_back(l.c_str());
+            }
+            Check(anofox_ml_fit_labels(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                       labels.data(), w, &blob),
+                  "ml_fit_agg");
+        } else {
+            Check(anofox_ml_fit(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                s.has_y ? s.y->data() : nullptr, w, &blob),
+                  "ml_fit_agg");
+        }
         FlatVector::GetData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
@@ -398,8 +420,9 @@ constexpr char kOutlierMethods[] = "score_samples,decision_function";
 // sent to the FFI in one call; `emit(row, values, n_values)` writes one
 // output row.
 //===--------------------------------------------------------------------===//
-template <class EMIT>
-void ApplyBatched(DataChunk &args, const char *function, const char *method, Vector &result, EMIT &&emit) {
+// `call(model, x, rows, n_cols)` runs the FFI on one batch of rows.
+template <class CALL>
+void ApplyBatchedWith(DataChunk &args, const char *function, Vector &result, CALL &&call) {
     idx_t count = args.size();
     UnifiedVectorFormat model_data, x_data;
     args.data[0].ToUnifiedFormat(count, model_data);
@@ -423,15 +446,7 @@ void ApplyBatched(DataChunk &args, const char *function, const char *method, Vec
         if (rows.empty()) {
             return;
         }
-        AnofoxMlDoubles out {nullptr, 0};
-        size_t out_cols = 0;
-        Check(anofox_ml_apply(reinterpret_cast<const uint8_t *>(current.GetData()), current.GetSize(), method,
-                              x.data(), rows.size(), n_cols, &out, &out_cols),
-              function);
-        for (idx_t r = 0; r < rows.size(); r++) {
-            emit(rows[r], out.data + r * out_cols, out_cols);
-        }
-        anofox_ml_free_doubles(out);
+        call(current, x, rows, n_cols);
         rows.clear();
         x.clear();
     };
@@ -463,6 +478,40 @@ void ApplyBatched(DataChunk &args, const char *function, const char *method, Vec
         rows.push_back(i);
     }
     flush();
+}
+
+template <class EMIT>
+void ApplyBatched(DataChunk &args, const char *function, const char *method, Vector &result, EMIT &&emit) {
+    ApplyBatchedWith(args, function, result,
+                     [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+                         AnofoxMlDoubles out {nullptr, 0};
+                         size_t out_cols = 0;
+                         Check(anofox_ml_apply(reinterpret_cast<const uint8_t *>(model.GetData()), model.GetSize(),
+                                               method, x.data(), rows.size(), n_cols, &out, &out_cols),
+                               function);
+                         for (idx_t r = 0; r < rows.size(); r++) {
+                             emit(rows[r], out.data + r * out_cols, out_cols);
+                         }
+                         anofox_ml_free_doubles(out);
+                     });
+}
+
+//===--------------------------------------------------------------------===//
+// ml_predict_label(model BLOB, x DOUBLE[]) -> VARCHAR (string class label)
+//===--------------------------------------------------------------------===//
+void MlPredictLabelFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto out = FlatVector::GetData<string_t>(result);
+    ApplyBatchedWith(args, "ml_predict_label", result,
+                     [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+                         AnofoxMlStrings labels {nullptr, 0};
+                         Check(anofox_ml_predict_labels(reinterpret_cast<const uint8_t *>(model.GetData()),
+                                                        model.GetSize(), x.data(), rows.size(), n_cols, &labels),
+                               "ml_predict_label");
+                         for (idx_t r = 0; r < rows.size(); r++) {
+                             out[rows[r]] = StringVector::AddString(result, labels.data[r]);
+                         }
+                         anofox_ml_free_strings(labels);
+                     });
 }
 
 //===--------------------------------------------------------------------===//
@@ -530,6 +579,7 @@ LogicalType ModelInfoType() {
     fields.emplace_back("params", LogicalType::VARCHAR);
     fields.emplace_back("format_version", LogicalType::INTEGER);
     fields.emplace_back("crate_version", LogicalType::VARCHAR);
+    fields.emplace_back("labels", LogicalType::LIST(LogicalType::VARCHAR));
     return LogicalType::STRUCT(std::move(fields));
 }
 
@@ -574,6 +624,11 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
         fields.emplace_back("params", Value(info.params ? info.params : ""));
         fields.emplace_back("format_version", Value::INTEGER(info.format_version));
         fields.emplace_back("crate_version", Value(info.crate_version ? info.crate_version : ""));
+        vector<Value> labels;
+        for (size_t j = 0; j < info.labels.len; j++) {
+            labels.push_back(Value(info.labels.data[j]));
+        }
+        fields.emplace_back("labels", Value::LIST(LogicalType::VARCHAR, std::move(labels)));
         anofox_ml_free_model_info(info);
         result.SetValue(i, Value::STRUCT(std::move(fields)));
     }
@@ -594,6 +649,8 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         ScalarFunction("ml_model_fitted", {LogicalType::BLOB}, LogicalType::VARCHAR, MlModelFittedFunction));
     const vector<LogicalType> model_and_x {LogicalType::BLOB, LogicalType::LIST(LogicalType::DOUBLE)};
     loader.RegisterFunction(ScalarFunction("ml_predict", model_and_x, LogicalType::DOUBLE, MlPredictFunction));
+    loader.RegisterFunction(
+        ScalarFunction("ml_predict_label", model_and_x, LogicalType::VARCHAR, MlPredictLabelFunction));
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
         {"ml_transform", "transform"},         {"ml_inverse_transform", "inverse_transform"},
@@ -623,6 +680,11 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         FitUpdate<true, true>));
     fit_set.AddFunction(
         make_fit({LogicalType::VARCHAR, features, LogicalType::VARCHAR, LogicalType::DOUBLE}, FitUpdate<false, true>));
+    // String class labels.
+    const auto V = LogicalType::VARCHAR;
+    fit_set.AddFunction(make_fit({V, V, features}, FitUpdate<true, false, true>));
+    fit_set.AddFunction(make_fit({V, V, features, V}, FitUpdate<true, false, true>));
+    fit_set.AddFunction(make_fit({V, V, features, V, LogicalType::DOUBLE}, FitUpdate<true, true, true>));
     loader.RegisterFunction(fit_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;

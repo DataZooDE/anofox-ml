@@ -35,6 +35,10 @@ struct Meta {
     /// the column order of its probabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     classes: Option<Vec<f64>>,
+    /// String class labels of a model fitted on a `VARCHAR` target: the
+    /// model sees label `i` (sorted order) as the class `i`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    labels: Option<Vec<String>>,
 }
 
 /// Cached decoded model: (BLOB hash, BLOB length, metadata, model).
@@ -76,6 +80,57 @@ pub struct AnofoxMlModelInfo {
     pub format_version: u32,
     /// anofox-ml version that wrote the model.
     pub crate_version: *mut c_char,
+    /// String class labels (empty unless fitted on string labels).
+    pub labels: AnofoxMlStrings,
+}
+
+#[repr(C)]
+pub struct AnofoxMlStrings {
+    pub data: *mut *mut c_char,
+    pub len: usize,
+}
+
+fn into_strings<S: AsRef<str>>(v: &[S]) -> AnofoxMlStrings {
+    let ptrs: Vec<*mut c_char> = v
+        .iter()
+        .map(|s| cstring(s.as_ref().replace('\0', " ")))
+        .collect();
+    let len = ptrs.len();
+    AnofoxMlStrings {
+        data: Box::into_raw(ptrs.into_boxed_slice()).cast(),
+        len,
+    }
+}
+
+/// Read `n` NUL-terminated strings.
+unsafe fn strings<'a>(
+    p: *const *const c_char,
+    n: usize,
+    what: &str,
+) -> Result<Vec<&'a str>, String> {
+    if p.is_null() {
+        return Err(format!("{what} is NULL"));
+    }
+    std::slice::from_raw_parts(p, n)
+        .iter()
+        .map(|&s| str_arg(s, what))
+        .collect()
+}
+
+/// Sorted distinct labels and the code (index) of every value.
+pub(crate) fn encode_labels(values: &[&str]) -> (Vec<String>, Vec<f64>) {
+    let mut labels: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    let codes = values
+        .iter()
+        .map(|v| {
+            labels
+                .binary_search_by(|l| l.as_str().cmp(v))
+                .expect("present") as f64
+        })
+        .collect();
+    (labels, codes)
 }
 
 thread_local! {
@@ -242,6 +297,7 @@ fn fit_impl(
     x: ArrayView2<f64>,
     y: Option<ArrayView1<f64>>,
     w: Option<ArrayView1<f64>>,
+    labels: Option<Vec<String>>,
 ) -> Result<Vec<u8>, String> {
     let model = fit_model(kind, params, x, y, w)?;
     let bytes = model.to_bytes().map_err(|e| e.to_string())?;
@@ -258,6 +314,7 @@ fn fit_impl(
         kind: kind.to_string(),
         n_features: x.ncols(),
         classes,
+        labels,
     };
     Ok(encode(&meta, &bytes))
 }
@@ -363,7 +420,7 @@ pub unsafe extern "C" fn anofox_ml_fit(
         let x = matrix(x, n_rows, n_cols)?;
         let y = (!y.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(y, n_rows)));
         let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
-        fit_impl(kind, params, x, y, w)
+        fit_impl(kind, params, x, y, w, None)
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(bytes)) => {
@@ -377,6 +434,125 @@ pub unsafe extern "C" fn anofox_ml_fit(
         }
         Ok(Err(e)) => err(e),
         Err(_) => err("internal error (panic) while fitting"),
+    }
+}
+
+/// [`anofox_ml_fit`] for a classifier with string labels `y` (`n_rows`
+/// NUL-terminated strings): the labels are stored in the BLOB and the model
+/// is fitted on their sorted index.
+///
+/// # Safety
+/// As [`anofox_ml_fit`]; `y` holds `n_rows` NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_fit_labels(
+    kind: *const c_char,
+    params: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    y: *const *const c_char,
+    w: *const f64,
+    out: *mut AnofoxMlBytes,
+) -> *mut c_char {
+    let run = || -> Result<Vec<u8>, String> {
+        let kind = str_arg(kind, "kind")?;
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let x = matrix(x, n_rows, n_cols)?;
+        let (labels, codes) = encode_labels(&strings(y, n_rows, "y")?);
+        let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
+        fit_impl(
+            kind,
+            params,
+            x,
+            Some(ArrayView1::from(&codes)),
+            w,
+            Some(labels),
+        )
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            *out = AnofoxMlBytes {
+                data: b.as_mut_ptr(),
+                len: b.len(),
+            };
+            std::mem::forget(b);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while fitting"),
+    }
+}
+
+/// A class value as text: its label for a model fitted on string labels,
+/// otherwise the number (`1`, not `1.0`, for integral values).
+fn label_of(meta: &Meta, v: f64) -> Result<String, String> {
+    match &meta.labels {
+        Some(labels) => {
+            let i = v.round();
+            if v.is_finite() && i >= 0.0 && (i as usize) < labels.len() {
+                Ok(labels[i as usize].clone())
+            } else {
+                Err(format!(
+                    "{} predicted {v}, which is not a label index",
+                    meta.kind
+                ))
+            }
+        }
+        None if v.fract() == 0.0 && v.abs() < 1e15 => Ok(format!("{}", v as i64)),
+        None => Ok(v.to_string()),
+    }
+}
+
+/// Predict `n_rows` rows of `x` and return the class labels as strings.
+///
+/// # Safety
+/// As [`anofox_ml_predict`]; release `out` with [`anofox_ml_free_strings`].
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_predict_labels(
+    model: *const u8,
+    model_len: usize,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    out: *mut AnofoxMlStrings,
+) -> *mut c_char {
+    let run = || -> Result<Vec<String>, String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        let x = matrix(x, n_rows, n_cols)?;
+        let (v, cols) = apply_impl(blob, "predict", x)?;
+        if cols != 1 {
+            return Err(format!("predict returned {cols} columns"));
+        }
+        let (meta, _) = decode(blob)?;
+        v.iter().map(|&p| label_of(&meta, p)).collect()
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(v)) => {
+            *out = into_strings(&v);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while predicting"),
+    }
+}
+
+/// # Safety
+/// `s` was returned by this library.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_free_strings(s: AnofoxMlStrings) {
+    if !s.data.is_null() {
+        let v = Box::from_raw(std::ptr::slice_from_raw_parts_mut(s.data, s.len));
+        for p in v.iter() {
+            anofox_ml_free_string(*p);
+        }
     }
 }
 
@@ -614,6 +790,7 @@ pub unsafe extern "C" fn anofox_ml_model_info(
                 params: cstring(params.to_string()),
                 format_version: header.as_ref().map_or(0, |h| h.format_version),
                 crate_version: cstring(header.map(|h| h.crate_version).unwrap_or_default()),
+                labels: into_strings(meta.labels.as_deref().unwrap_or_default()),
             })
         })
     };
@@ -636,6 +813,7 @@ pub unsafe extern "C" fn anofox_ml_free_model_info(info: AnofoxMlModelInfo) {
     anofox_ml_free_string(info.capabilities);
     anofox_ml_free_string(info.params);
     anofox_ml_free_string(info.crate_version);
+    anofox_ml_free_strings(info.labels);
 }
 
 /// Version of this library (NUL-terminated, static).
@@ -1059,5 +1237,67 @@ mod tests {
             anofox_ml_free_string(s);
             anofox_ml_free_bytes(blob);
         }
+    }
+
+    #[test]
+    fn string_labels_round_trip() {
+        let x: Vec<f64> = (0..30).map(|i| (i % 15) as f64).collect();
+        let names = ["setosa", "virginica", "versicolor"];
+        let y: Vec<CString> = (0..30)
+            .map(|i| CString::new(names[(i % 15) / 5]).unwrap())
+            .collect();
+        let yp: Vec<*const c_char> = y.iter().map(|s| s.as_ptr()).collect();
+        let kind = CString::new("DecisionTreeClassifier").unwrap();
+        let mut blob = AnofoxMlBytes {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            let e = anofox_ml_fit_labels(
+                kind.as_ptr(),
+                std::ptr::null(),
+                x.as_ptr(),
+                30,
+                1,
+                yp.as_ptr(),
+                std::ptr::null(),
+                &mut blob,
+            );
+            assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
+            let mut out = AnofoxMlStrings {
+                data: std::ptr::null_mut(),
+                len: 0,
+            };
+            let e = anofox_ml_predict_labels(blob.data, blob.len, x.as_ptr(), 30, 1, &mut out);
+            assert!(e.is_null());
+            let got: Vec<&str> = std::slice::from_raw_parts(out.data, out.len)
+                .iter()
+                .map(|&p| CStr::from_ptr(p).to_str().unwrap())
+                .collect();
+            let want: Vec<&str> = y.iter().map(|s| s.to_str().unwrap()).collect();
+            assert_eq!(got, want);
+            anofox_ml_free_strings(out);
+            let mut info = std::mem::zeroed::<AnofoxMlModelInfo>();
+            assert!(anofox_ml_model_info(blob.data, blob.len, &mut info).is_null());
+            let labels: Vec<&str> = std::slice::from_raw_parts(info.labels.data, info.labels.len)
+                .iter()
+                .map(|&p| CStr::from_ptr(p).to_str().unwrap())
+                .collect();
+            assert_eq!(labels, ["setosa", "versicolor", "virginica"]);
+            anofox_ml_free_model_info(info);
+            anofox_ml_free_bytes(blob);
+        }
+    }
+
+    #[test]
+    fn numeric_classes_print_as_numbers() {
+        let meta = Meta {
+            kind: "X".into(),
+            n_features: 1,
+            classes: None,
+            labels: None,
+        };
+        assert_eq!(label_of(&meta, 1.0).unwrap(), "1");
+        assert_eq!(label_of(&meta, -2.5).unwrap(), "-2.5");
     }
 }

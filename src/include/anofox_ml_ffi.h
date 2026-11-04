@@ -20,10 +20,20 @@ typedef struct {
     size_t len;
 } AnofoxMlDoubles;
 
+typedef struct {
+    char **data;
+    size_t len;
+} AnofoxMlStrings;
+
 // Fit `kind` with JSON `params` (may be NULL) on row-major x (n_rows x n_cols);
 // y and w hold n_rows doubles or are NULL. `out` receives the model BLOB.
 char *anofox_ml_fit(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
                     const double *y, const double *w, AnofoxMlBytes *out);
+
+// anofox_ml_fit for a classifier on string labels y (n_rows strings); the
+// labels are stored in the BLOB.
+char *anofox_ml_fit_labels(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
+                           const char *const *y, const double *w, AnofoxMlBytes *out);
 
 typedef struct {
     char *kind;
@@ -33,7 +43,13 @@ typedef struct {
     char *params;            // JSON
     uint32_t format_version;
     char *crate_version;
+    AnofoxMlStrings labels; // string class labels (len 0 unless fitted on labels)
 } AnofoxMlModelInfo;
+
+// Predict n_rows rows of x; `out` receives one class label per row (the
+// number as text for models without string labels).
+char *anofox_ml_predict_labels(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
+                               AnofoxMlStrings *out);
 
 // Predict n_rows rows of x with a model BLOB; `out` receives n_rows doubles.
 char *anofox_ml_predict(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
@@ -70,6 +86,10 @@ char *anofox_ml_cv_splits(const char *method, const char *options, size_t n, con
                           AnofoxMlSplits *out);
 void anofox_ml_free_splits(AnofoxMlSplits s);
 
+// anofox_ml_metric on string labels (y_true, y_pred hold n strings each).
+char *anofox_ml_metric_labels(const char *name, const char *options, const char *const *y_true,
+                              const char *const *y_pred, size_t n, const double *w, double *out);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'
@@ -82,6 +102,7 @@ const char *anofox_ml_ffi_version(void);
 void anofox_ml_free_string(char *s);
 void anofox_ml_free_bytes(AnofoxMlBytes b);
 void anofox_ml_free_doubles(AnofoxMlDoubles d);
+void anofox_ml_free_strings(AnofoxMlStrings s);
 void anofox_ml_free_model_info(AnofoxMlModelInfo info);
 
 #ifdef __cplusplus

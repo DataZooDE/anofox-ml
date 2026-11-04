@@ -48,8 +48,9 @@ const char *kFitPredictProba = R"(
 WITH _src AS (FROM query_table(source::VARCHAR)),
 _m AS (SELECT group_col AS _g, ml_fit_agg(kind, y_col, x_cols, params) AS _model
        FROM _src WHERE y_col IS NOT NULL GROUP BY ALL)
-SELECT _src.*, ml_predict(_m._model, x_cols) AS prediction, ml_predict_proba(_m._model, x_cols) AS proba,
-       ml_model_info(_m._model).classes AS classes
+SELECT _src.*, ml_predict(_m._model, x_cols) AS prediction, ml_predict_label(_m._model, x_cols) AS label,
+       ml_predict_proba(_m._model, x_cols) AS proba, ml_model_info(_m._model).classes AS classes,
+       ml_model_info(_m._model).labels AS labels
 FROM _src LEFT JOIN _m ON group_col IS NOT DISTINCT FROM _m._g
 )";
 

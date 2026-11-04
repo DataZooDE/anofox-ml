@@ -313,3 +313,29 @@ SELECT ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE, 1.0]) FROM range(1000) 
 
 statement ok
 RESET anofox_ml_max_fit_values;
+
+# Parallel fits: a single fit uses the shared pool, and the model does not
+# depend on the thread count (KMeans always fits sequentially).
+statement ok
+CREATE TABLE par AS SELECT i AS id, (hash(i) % 1000) / 100.0 AS a, (hash(i, 'b') % 1000) / 100.0 AS b FROM range(3000) t(i);
+
+statement ok
+SET anofox_ml_threads = 1;
+
+statement ok
+CREATE TABLE seq AS SELECT ml_fit_agg('RandomForestRegressor', 2 * a + b, [a, b], '{"n_estimators": 20}') AS rf,
+    ml_fit_agg('KMeans', [a, b], '{"n_clusters": 4}') AS km, ml_fit_agg('IsolationForest', [a, b]) AS iso FROM par;
+
+statement ok
+SET anofox_ml_threads = 8;
+
+query III
+SELECT seq.rf = ml_fit_agg('RandomForestRegressor', 2 * a + b, [a, b], '{"n_estimators": 20}'),
+       seq.km = ml_fit_agg('KMeans', [a, b], '{"n_clusters": 4}'),
+       seq.iso = ml_fit_agg('IsolationForest', [a, b])
+FROM par, seq GROUP BY seq.rf, seq.km, seq.iso;
+----
+true	true	true
+
+statement ok
+RESET anofox_ml_threads;

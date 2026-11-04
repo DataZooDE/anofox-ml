@@ -143,10 +143,48 @@ pub(crate) fn encode_labels(values: &[&str]) -> (Vec<String>, Vec<f64>) {
     (labels, codes)
 }
 
+/// Kinds whose fit is not bit-identical across thread counts in anofox-ml
+/// 0.2 (parallel floating-point reductions); they always fit sequentially so
+/// results do not depend on DuckDB's `threads` (sipemu/anofox-ml#108).
+const SEQUENTIAL_KINDS: &[&str] = &["KMeans"];
+
+/// The process-wide pool fits run in, sized to the thread budget of the
+/// query (DuckDB's `threads`, or `anofox_ml_threads`). A DuckDB worker that
+/// finalizes a group blocks in `install` while the pool runs the fit, so
+/// many groups share the same threads and a single fit can use them all.
+static SHARED: std::sync::Mutex<Option<(usize, std::sync::Arc<rayon::ThreadPool>)>> =
+    std::sync::Mutex::new(None);
+
+fn shared_pool(threads: usize) -> Result<std::sync::Arc<rayon::ThreadPool>, String> {
+    let mut guard = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((n, pool)) = guard.as_ref() {
+        if *n == threads {
+            return Ok(pool.clone());
+        }
+    }
+    let pool = std::sync::Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("anofox-ml-{i}"))
+            .build()
+            .map_err(|e| e.to_string())?,
+    );
+    *guard = Some((threads, pool.clone()));
+    Ok(pool)
+}
+
+/// Run a fit of `kind` with up to `threads` threads.
+fn run_fit<T: Send>(kind: &str, threads: usize, f: impl FnOnce() -> T + Send) -> Result<T, String> {
+    if threads <= 1 || SEQUENTIAL_KINDS.contains(&kind) {
+        Ok(POOL.with(|p| p.install(f)))
+    } else {
+        Ok(shared_pool(threads)?.install(f))
+    }
+}
+
 thread_local! {
-    /// One rayon thread per DuckDB worker: DuckDB already parallelises
-    /// across groups, so estimators with their own parallelism (forests)
-    /// must not spawn more threads.
+    /// One rayon thread per DuckDB worker, for predictions (DuckDB already
+    /// runs chunks in parallel) and sequential fits.
     static POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
@@ -263,6 +301,7 @@ fn fit_model(
     x: ArrayView2<f64>,
     y: Option<ArrayView1<f64>>,
     w: Option<ArrayView1<f64>>,
+    threads: usize,
 ) -> Result<Box<dyn DynModel>, String> {
     let params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
@@ -270,8 +309,7 @@ fn fit_model(
         serde_json::from_str(params).map_err(|e| format!("invalid params JSON: {e}"))?
     };
     let mut model = anofox_ml_registry::make(kind, &params).map_err(|e| e.to_string())?;
-    POOL.with(|p| p.install(|| model.fit(x, y, w)))
-        .map_err(|e| e.to_string())?;
+    run_fit(kind, threads, || model.fit(x, y, w))?.map_err(|e| e.to_string())?;
     Ok(model)
 }
 
@@ -314,8 +352,9 @@ fn fit_impl(
     y: Option<ArrayView1<f64>>,
     w: Option<ArrayView1<f64>>,
     labels: Option<Vec<String>>,
+    threads: usize,
 ) -> Result<Vec<u8>, String> {
-    let model = fit_model(kind, params, x, y, w)?;
+    let model = fit_model(kind, params, x, y, w, threads)?;
     let bytes = model.to_bytes().map_err(|e| e.to_string())?;
     let classes = match y {
         Some(y) if model.capabilities().contains(&"predict_proba") => {
@@ -346,8 +385,9 @@ fn fit_apply_impl(
     y: Option<ArrayView1<f64>>,
     w: Option<ArrayView1<f64>>,
     methods: &str,
+    threads: usize,
 ) -> Result<(Vec<f64>, usize), String> {
-    let model = fit_model(kind, params, x, y, w)?;
+    let model = fit_model(kind, params, x, y, w, threads)?;
     let caps = model.capabilities();
     let wanted: Vec<&str> = methods.split(',').map(str::trim).collect();
     let method = wanted
@@ -383,6 +423,7 @@ pub unsafe extern "C" fn anofox_ml_fit_apply(
     y: *const f64,
     w: *const f64,
     methods: *const c_char,
+    threads: usize,
     out: *mut AnofoxMlDoubles,
     out_cols: *mut usize,
 ) -> *mut c_char {
@@ -397,7 +438,7 @@ pub unsafe extern "C" fn anofox_ml_fit_apply(
         let x = matrix(x, n_rows, n_cols)?;
         let y = (!y.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(y, n_rows)));
         let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
-        fit_apply_impl(kind, params, x, y, w, methods)
+        fit_apply_impl(kind, params, x, y, w, methods, threads)
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok((v, cols))) => {
@@ -410,8 +451,9 @@ pub unsafe extern "C" fn anofox_ml_fit_apply(
     }
 }
 
-/// Fit `kind` with JSON `params` on `x` (and `y`, `w` when non-NULL) and
-/// return the model BLOB in `out`.
+/// Fit `kind` with JSON `params` on `x` (and `y`, `w` when non-NULL) with up
+/// to `threads` threads (0 or 1 = sequential) and return the model BLOB in
+/// `out`.
 ///
 /// # Safety
 /// `kind` / `params` are NUL-terminated strings (`params` may be NULL);
@@ -426,6 +468,7 @@ pub unsafe extern "C" fn anofox_ml_fit(
     n_cols: usize,
     y: *const f64,
     w: *const f64,
+    threads: usize,
     out: *mut AnofoxMlBytes,
 ) -> *mut c_char {
     let run = || -> Result<Vec<u8>, String> {
@@ -438,7 +481,7 @@ pub unsafe extern "C" fn anofox_ml_fit(
         let x = matrix(x, n_rows, n_cols)?;
         let y = (!y.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(y, n_rows)));
         let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
-        fit_impl(kind, params, x, y, w, None)
+        fit_impl(kind, params, x, y, w, None, threads)
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(bytes)) => {
@@ -470,6 +513,7 @@ pub unsafe extern "C" fn anofox_ml_fit_labels(
     n_cols: usize,
     y: *const *const c_char,
     w: *const f64,
+    threads: usize,
     out: *mut AnofoxMlBytes,
 ) -> *mut c_char {
     let run = || -> Result<Vec<u8>, String> {
@@ -489,6 +533,7 @@ pub unsafe extern "C" fn anofox_ml_fit_labels(
             Some(ArrayView1::from(&codes)),
             w,
             Some(labels),
+            threads,
         )
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
@@ -916,6 +961,7 @@ mod tests {
                 2,
                 y.as_ptr(),
                 std::ptr::null(),
+                1,
                 &mut blob,
             );
             assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
@@ -958,6 +1004,7 @@ mod tests {
                 1,
                 std::ptr::null(),
                 std::ptr::null(),
+                1,
                 &mut blob,
             );
             assert!(!e.is_null());
@@ -1003,6 +1050,7 @@ mod tests {
                 n_cols,
                 y.map_or(std::ptr::null(), <[f64]>::as_ptr),
                 std::ptr::null(),
+                1,
                 &mut blob,
             );
             assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
@@ -1148,6 +1196,7 @@ mod tests {
                 std::ptr::null(),
                 std::ptr::null(),
                 methods.as_ptr(),
+                1,
                 &mut out,
                 &mut cols,
             );
@@ -1249,6 +1298,7 @@ mod tests {
                 1,
                 std::ptr::null(),
                 w.as_ptr(),
+                1,
                 &mut blob,
             );
             assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
@@ -1297,6 +1347,7 @@ mod tests {
                 1,
                 yp.as_ptr(),
                 std::ptr::null(),
+                1,
                 &mut blob,
             );
             assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());

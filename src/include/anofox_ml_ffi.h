@@ -27,14 +27,15 @@ typedef struct {
 } AnofoxMlStrings;
 
 // Fit `kind` with JSON `params` (may be NULL) on row-major x (n_rows x n_cols);
-// y and w hold n_rows doubles or are NULL. `out` receives the model BLOB.
+// y and w hold n_rows doubles or are NULL. The fit uses up to `threads`
+// threads of a shared pool (0 or 1 = sequential). `out` receives the BLOB.
 char *anofox_ml_fit(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
-                    const double *y, const double *w, AnofoxMlBytes *out);
+                    const double *y, const double *w, size_t threads, AnofoxMlBytes *out);
 
 // anofox_ml_fit for a classifier on string labels y (n_rows strings); the
 // labels are stored in the BLOB.
 char *anofox_ml_fit_labels(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
-                           const char *const *y, const double *w, AnofoxMlBytes *out);
+                           const char *const *y, const double *w, size_t threads, AnofoxMlBytes *out);
 
 typedef struct {
     char *kind;
@@ -66,8 +67,8 @@ char *anofox_ml_apply(const uint8_t *model, size_t model_len, const char *method
 // comma-separated `methods` (e.g. "labels,predict") on the training rows; the
 // model is not kept.
 char *anofox_ml_fit_apply(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
-                          const double *y, const double *w, const char *methods, AnofoxMlDoubles *out,
-                          size_t *out_cols);
+                          const double *y, const double *w, const char *methods, size_t threads,
+                          AnofoxMlDoubles *out, size_t *out_cols);
 
 // Metric `name` (r2, f1, roc_auc, ...) with JSON `options` (may be NULL) on n
 // rows: y_true holds n doubles, y_pred n * n_cols (row-major), w n or NULL.

@@ -10,6 +10,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
@@ -178,15 +179,20 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
 
 // The memory guard of the fitting aggregates, read from the
 // anofox_ml_max_fit_values setting at bind time.
+// Settings of the fitting aggregates, read at bind time: the memory guard
+// (anofox_ml_max_fit_values) and the thread budget of a fit
+// (anofox_ml_threads, 0 = DuckDB's threads).
 struct FitBindData : public FunctionData {
-    explicit FitBindData(uint64_t max_values_p) : max_values(max_values_p) {
+    FitBindData(uint64_t max_values_p, idx_t threads_p) : max_values(max_values_p), threads(threads_p) {
     }
     uint64_t max_values; // 0 = unlimited
+    idx_t threads;
     unique_ptr<FunctionData> Copy() const override {
-        return make_uniq<FitBindData>(max_values);
+        return make_uniq<FitBindData>(max_values, threads);
     }
     bool Equals(const FunctionData &other) const override {
-        return max_values == other.Cast<FitBindData>().max_values;
+        auto &o = other.Cast<FitBindData>();
+        return max_values == o.max_values && threads == o.threads;
     }
 };
 
@@ -196,7 +202,18 @@ unique_ptr<FunctionData> FitBind(ClientContext &context, AggregateFunction &, ve
     if (context.TryGetCurrentSetting("anofox_ml_max_fit_values", v) && !v.IsNull()) {
         max_values = v.GetValue<uint64_t>();
     }
-    return make_uniq<FitBindData>(max_values);
+    idx_t threads = 0;
+    if (context.TryGetCurrentSetting("anofox_ml_threads", v) && !v.IsNull()) {
+        threads = v.GetValue<uint64_t>();
+    }
+    if (threads == 0) {
+        threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+    }
+    return make_uniq<FitBindData>(max_values, threads);
+}
+
+idx_t FitThreads(const AggregateInputData &aggr) {
+    return aggr.bind_data ? aggr.bind_data->Cast<FitBindData>().threads : 1;
 }
 
 void CheckFitSize(const AggregateInputData &aggr, idx_t n_values) {
@@ -375,7 +392,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
     }
 }
 
-void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
@@ -402,11 +419,11 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
                 labels.push_back(l.c_str());
             }
             Check(anofox_ml_fit_labels(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
-                                       labels.data(), w, &blob),
+                                       labels.data(), w, FitThreads(aggr), &blob),
                   "ml_fit_agg");
         } else {
             Check(anofox_ml_fit(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
-                                s.has_y ? s.y->data() : nullptr, w, &blob),
+                                s.has_y ? s.y->data() : nullptr, w, FitThreads(aggr), &blob),
                   "ml_fit_agg");
         }
         FlatVector::GetData<string_t>(result)[row] =
@@ -422,7 +439,7 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
 // ORDER BY inside the aggregate to fix it); skipped rows get NULL.
 //===--------------------------------------------------------------------===//
 template <const char *FUNCTION, const char *METHODS, class T>
-void RowsFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void RowsFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
     auto entries = FlatVector::GetData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
@@ -436,8 +453,8 @@ void RowsFinalize(Vector &state_vector, AggregateInputData &, Vector &result, id
         AnofoxMlDoubles out {nullptr, 0};
         size_t out_cols = 0;
         Check(anofox_ml_fit_apply(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
-                                  s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr, METHODS, &out,
-                                  &out_cols),
+                                  s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr, METHODS,
+                                  FitThreads(aggr), &out, &out_cols),
               FUNCTION);
         if (out_cols != 1) {
             anofox_ml_free_doubles(out);
@@ -470,7 +487,7 @@ void RowsFinalize(Vector &state_vector, AggregateInputData &, Vector &result, id
 // embedding (t-SNE, Isomap, LLE, MDS; TargetEncoder's cross-fitted encoding)
 // or else `transform` of the training rows. Row order as in RowsFinalize.
 //===--------------------------------------------------------------------===//
-void FitTransformFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void FitTransformFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
     static constexpr const char *FUNCTION = "ml_fit_transform_agg";
     auto states = FlatVector::GetData<FitState *>(state_vector);
     auto entries = FlatVector::GetData<list_entry_t>(result);
@@ -486,7 +503,7 @@ void FitTransformFinalize(Vector &state_vector, AggregateInputData &, Vector &re
         size_t out_cols = 0;
         Check(anofox_ml_fit_apply(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
                                   s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr,
-                                  "embedding,transform", &out, &out_cols),
+                                  "embedding,transform", FitThreads(aggr), &out, &out_cols),
               FUNCTION);
         // Outer list: one entry per input row; inner list: out_cols values.
         idx_t n = s.used->size();

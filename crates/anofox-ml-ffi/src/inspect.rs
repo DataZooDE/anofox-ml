@@ -199,6 +199,7 @@ mod tests {
             Some(ArrayView1::from(&y)),
             None,
             None,
+            1,
         )
         .unwrap();
         let imp = importance(&blob, xv.view(), Array1::from(y.clone()), r#"{"seed": 1}"#).unwrap();

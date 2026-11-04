@@ -15,7 +15,7 @@
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 104 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. Metrics, fit-predict table macros and tuning are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested. Tuning and the remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
 
 ## ✨ Key Features
@@ -114,12 +114,13 @@ SELECT store,
 FROM train
 GROUP BY store;
 
--- predict with the stored models and compute the RMSE per store
+-- predict with the stored models and evaluate per store
 SELECT store,
-       sqrt(avg(power(units - ml_predict(m.model, [price, promo, dow]), 2))) AS rmse
+       ml_rmse(units, ml_predict(m.model, [price, promo, dow])) AS rmse,
+       ml_r2(units, ml_predict(m.model, [price, promo, dow])) AS r2
 FROM test t JOIN models m USING (store)
 GROUP BY store ORDER BY store;
--- store_0 ≈ 1.59, store_1 ≈ 1.70, store_2 ≈ 1.84
+-- rmse: store_0 ≈ 1.59, store_1 ≈ 1.70, store_2 ≈ 1.84
 
 -- what is stored in a model
 SELECT store, ml_model_info(model).kind, ml_model_info(model).n_features FROM models;
@@ -139,9 +140,18 @@ FROM train ORDER BY score LIMIT 3;
 More patterns:
 
 ```sql
--- class probabilities, in the order of the stored classes
+-- class probabilities, in the order of the stored classes, and their scores
 SELECT ml_model_info(model).classes, ml_predict_proba(model, [x1, x2])
 FROM churn_model, customers;
+
+SELECT ml_roc_auc(churned, ml_predict_proba(model, [x1, x2])[2]) AS auc,
+       ml_log_loss(churned, ml_predict_proba(model, [x1, x2])) AS log_loss,
+       ml_f1(churned, ml_predict(model, [x1, x2])) AS f1
+FROM churn_model, customers;
+
+-- string class labels
+CREATE TABLE iris_model AS SELECT ml_fit_agg('RandomForestClassifier', species, [sepal_length, petal_width]) AS model FROM iris;
+SELECT ml_accuracy(species, ml_predict_label(model, [sepal_length, petal_width])) FROM iris, iris_model;
 
 -- unsupervised fit: standardise features, then transform
 CREATE TABLE scaler AS SELECT ml_fit_agg('StandardScaler', [price, promo]) AS model FROM train;
@@ -151,6 +161,10 @@ SELECT ml_transform(model, [price, promo]) FROM train, scaler;
 SELECT unnest(list(id ORDER BY id)) AS id,
        unnest(ml_fit_transform_agg('TSne', [x1, x2, x3], '{"n_components": 2}' ORDER BY id)) AS xy
 FROM points;
+
+-- which features matter (on held-out rows)
+SELECT unnest(ml_permutation_importance_agg(model, y, [x1, x2, x3], '{"n_repeats": 10}'), recursive := true)
+FROM test, models GROUP BY model;
 
 -- sample weights and the fitted state
 SELECT ml_model_fitted(ml_fit_agg('OlsRegressor', y, [x1, x2], '{}', weight)) FROM train;
@@ -164,31 +178,170 @@ SELECT kind, default_params FROM ml_estimators();
 | Function | Description |
 |---|---|
 | `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
-| `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
+| `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `y` is `DOUBLE`, or `VARCHAR` class labels for classifiers. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
 | `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
-| `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`) |
+| `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
+| `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
-| `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`) |
+| `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`); `ml_transform(encoder, [VARCHAR, …])` for the categorical encoders |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
 | `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
 | `ml_outlier_score_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
 | `ml_fit_transform_agg(kind, [y,] [x1, x2, …] [, params [, weight]])` | Aggregate: fit on the group and return each row's output (`DOUBLE[][]`): the training embedding of t-SNE, Isomap, LLE and MDS, TargetEncoder's cross-fitted encoding, or `transform` of the training rows |
-| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version` and `crate_version` |
+| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version`, `crate_version` and `labels` (string class labels) |
+| `ml_permutation_importance_agg(model, y, [x1, x2, …] [, options])` | Aggregate over evaluation rows: `STRUCT(feature, importance_mean, importance_std)[]`, the drop in a metric when feature `feature` (1-based, as in `x[feature]`) is shuffled. Options: `metric` (any metric aggregate name; default `accuracy` for classifiers, `r2` otherwise; losses are negated so higher = more important), `metric_options`, `n_repeats` (5), `seed` |
 | `ml_model_fitted(model)` | The fitted state as JSON: coefficients, centroids, components, trees, … (arrays as `{"v", "dim", "data"}`, e.g. `json_extract(ml_model_fitted(m), '$.coef.data')`) |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
+
+### Categorical Features
+
+`OneHotEncoder` and `OrdinalEncoder` work on `VARCHAR` columns, as in scikit-learn: `ml_fit_agg(kind, [col_a, col_b, …] [, params])` learns the sorted categories of every column, and `ml_transform(encoder, [col_a, col_b, …])` returns a `DOUBLE[]` to combine with numeric features via `list_concat`.
+
+| Params | Description |
+|---|---|
+| `handle_unknown` | `"error"` (default) or `"ignore"`: an unseen category encodes as all zeros (one-hot) or `unknown_value` (ordinal, default -1) |
+| `drop` | One-hot only: `"first"` drops each column's first category, `"if_binary"` only for two-category columns |
+
+Rows with a NULL value are skipped when fitting and encode as NULL; use `coalesce(col, 'missing')` to keep them as a category.
+
+```sql
+CREATE TABLE enc AS SELECT ml_fit_agg('OneHotEncoder', [city, channel], '{"handle_unknown": "ignore"}') AS e FROM train;
+CREATE TABLE model AS
+SELECT ml_fit_agg('HistGradientBoostingRegressor', sales, list_concat(ml_transform(e, [city, channel]), [price, promo])) AS m
+FROM train, enc;
+SELECT ml_predict(m, list_concat(ml_transform(e, [city, channel]), [price, promo])) FROM test, enc, model;
+```
+
+### Text Features
+
+| Function | Description |
+|---|---|
+| `ml_hashing_vectorize(text, n_features [, options])` | scikit-learn's `HashingVectorizer`: unigram tokens (2+ word characters) hashed into `n_features` buckets, as a dense `DOUBLE[]` to feed estimators directly. Options: `alternate_sign` (true), `norm` (`"l2"` or `null` for counts) |
+| `ml_hashing_vectorize_sparse(text, n_features [, options])` | The same as `STRUCT(indices INTEGER[], values DOUBLE[])`, buckets 0-based, for large `n_features` |
+
+```sql
+CREATE TABLE spam_model AS
+SELECT ml_fit_agg('MultinomialNB', label, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) AS model FROM mails;
+SELECT ml_predict_label(model, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) FROM new_mails, spam_model;
+```
+
+### Conformal Prediction
+
+Split conformal prediction: calibrate a fitted model on held-out rows, then ask for prediction intervals (regressors) or prediction sets (classifiers) at any miscoverage `alpha`. Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.
+
+| Function | Description |
+|---|---|
+| `ml_conformalize_agg(model, y, [x1, x2, …])` | Aggregate over calibration rows: a copy of `model` with its conformity scores (absolute residuals for regressors, `1 − p(true class)` for classifiers). `y` may be `VARCHAR` for a model fitted on string labels |
+| `ml_predict_interval(model, [x1, x2, …], alpha)` | `STRUCT(lower, upper)` = prediction ± the conformal quantile of the residuals (infinite when there are too few calibration rows for `alpha`) |
+| `ml_predict_set(model, [x1, x2, …], alpha)` | `VARCHAR[]` of the classes whose score is within the conformal quantile |
+| `ml_conformal_margin(y, y_pred, alpha)` | Aggregate: the conformal quantile of `abs(y − y_pred)`, model-free |
+
+```sql
+CREATE TABLE model AS SELECT ml_fit_agg('HistGradientBoostingRegressor', y, [x1, x2]) AS m FROM train;
+CREATE TABLE calibrated AS SELECT ml_conformalize_agg(m, y, [x1, x2]) AS m FROM calibration, model GROUP BY ALL;
+
+SELECT ml_predict(m, [x1, x2]) AS forecast,
+       ml_predict_interval(m, [x1, x2], 0.1) AS pi90
+FROM test, calibrated;
+
+-- check it: coverage and interval score
+SELECT ml_coverage(y, pi90.lower, pi90.upper), ml_interval_score(y, pi90.lower, pi90.upper, 0.1)
+FROM (SELECT y, ml_predict_interval(m, [x1, x2], 0.1) AS pi90 FROM test, calibrated);
+```
+
+### Table Macros
+
+One-shot workflows over a table (name as a string) and its columns. They keep every source column and add the result columns. Pass a constant such as `1` as `group_col` for a single model over the whole table. `id_col` must be unique within a group; it aligns per-row results and fixes the row order.
+
+| Macro | Adds |
+|---|---|
+| `ml_fit_predict_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`: one model per group, fitted on the rows with a target, predicting every row (also those without one) |
+| `ml_fit_predict_proba_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`, `label`, `proba DOUBLE[]`, `classes` and `labels` |
+| `ml_cross_val_predict_by(source, group_col, id_col, y_col, x_cols, kind [, params := …, method := 'kfold', options := '{}'])` | `split` and the out-of-fold `prediction` of every labelled row (methods as in `ml_cv_splits_agg`) |
+| `ml_cluster_by(source, group_col, id_col, x_cols, kind [, params := …])` | `cluster` |
+| `ml_outlier_score_by(source, group_col, id_col, x_cols, kind [, params := …])` | `outlier_score` |
+| `ml_fit_transform_by(source, group_col, id_col, x_cols, kind [, params := …])` | `features DOUBLE[]` (embeddings, encodings, transforms) |
+
+```sql
+-- train and forecast in one call: rows with NULL sales get a forecast
+FROM ml_fit_predict_by('sales', store, sales, [price, promo, dow], 'HistGradientBoostingRegressor',
+                       params := '{"n_estimators": 200}');
+
+-- 5-fold cross-validated RMSE per store
+SELECT store, ml_rmse(sales, prediction) AS cv_rmse
+FROM ml_cross_val_predict_by('sales', store, id, sales, [price, promo, dow], 'RandomForestRegressor',
+                             options := '{"n_splits": 5, "shuffle": true}')
+GROUP BY store;
+
+-- clusters and outlier scores per row
+FROM ml_cluster_by('points', region, id, [x, y], 'Hdbscan', params := '{"min_cluster_size": 10}');
+FROM ml_outlier_score_by('readings', machine, id, [temp, vibration], 'IsolationForest');
+```
+
+### Metrics
+
+Aggregates over `(y_true, y_pred)`: no model is needed, so they score any prediction, per group or over the whole table. Rows with a NULL argument are skipped and an empty group gives NULL. They are computed by anofox-ml's metrics crate and match scikit-learn.
+
+| Function | Description |
+|---|---|
+| `ml_r2`, `ml_mse`, `ml_rmse`, `ml_mae`, `ml_mape`, `ml_median_absolute_error`, `ml_max_error`, `ml_explained_variance`, `ml_mean_squared_log_error` `(y, y_pred)` | Regression |
+| `ml_accuracy`, `ml_precision`, `ml_recall`, `ml_f1`, `ml_fbeta` `(y, y_pred [, options [, weight]])` | Classification on labels (`DOUBLE` or `VARCHAR`). `options` JSON: `average` (`binary` default, `macro`, `micro`, `weighted`), `pos_label`, `zero_division` (`0`, `1`, `"nan"`), `labels`, `beta` |
+| `ml_balanced_accuracy`, `ml_matthews_corrcoef` (binary), `ml_cohen_kappa` `(y, y_pred)` | Classification on labels (`DOUBLE` or `VARCHAR`) |
+| `ml_roc_auc`, `ml_log_loss` `(y, score DOUBLE \| proba DOUBLE[] [, options [, weight]])` | Binary score or per-class probabilities (columns in sorted label order, or `labels`). ROC AUC options: `multi_class` (`ovr`, `ovo`), `average` |
+| `ml_brier_score(y, p [, options [, weight]])`, `ml_average_precision(y, score)` | Binary probabilities and scores |
+| `ml_adjusted_rand`, `ml_normalized_mutual_info` `(labels_true, labels_pred)`, `ml_silhouette(x DOUBLE[], label)` | Clustering |
+| `ml_coverage(y, lower, upper)`, `ml_interval_score(y, lower, upper, alpha)` | Prediction intervals |
+
+### Cross-Validation
+
+`ml_cv_splits_agg(id, method, options [, y [, groups]] ORDER BY …)` returns one `STRUCT(id, split, role)` per row and split, where `role` is `'train'` or `'test'`. `unnest(…, recursive := true)` turns that into a fold table to join back to the data. The `ORDER BY` inside the aggregate fixes the row order, which is the time order for the time-series methods.
+
+| Method | Needs | Options (scikit-learn names and defaults) |
+|---|---|---|
+| `kfold`, `repeated_kfold` | — | `n_splits` (5), `shuffle`, `seed`, `n_repeats` (10) |
+| `shuffle_split` | — | `n_splits` (10), `test_size` (0.1), `seed` |
+| `leave_one_out`, `leave_p_out` | — | `p` |
+| `time_series` | — | `n_splits` (5), `test_size` (rows), `gap`, `max_train_size`, `min_train_size` |
+| `stratified_kfold`, `repeated_stratified_kfold`, `stratified_shuffle_split` | `y` | `n_splits`, `n_repeats`, `test_size`, `seed` (the stratified folds are always shuffled with `seed`) |
+| `stratified_kfold_continuous` | `y` | `n_splits`, `n_bins` (10), `seed` |
+| `group_kfold`, `leave_one_group_out`, `leave_p_groups_out`, `group_shuffle_split` | `groups` | `n_splits`, `shuffle`, `seed`, `p`, `test_size` (0.2), `train_size` |
+| `group_time_series` | `groups` (time keys, in `ORDER BY` order) | as `time_series` |
+| `stratified_group_kfold` | `y`, `groups` | `n_splits`, `shuffle`, `seed` |
+
+Pass `NULL` for `y` when a method only needs `groups`. Rows with a NULL id, or without the `y` / group the method needs, are left out.
+
+For labels that span time (a return over the next days, a churn window), `ml_purged_cv_splits_agg(id, t_start, t_end, method, options ORDER BY t_start)` purges training rows whose label interval `[t_start, t_end]` overlaps the test span, and drops `embargo` rows after it (López de Prado). Times are `DOUBLE`, e.g. `epoch(ts)`.
+
+| Method | Options |
+|---|---|
+| `purged_kfold` | `n_splits` (5), `embargo` (0 rows) |
+| `combinatorial_purged` | `n_groups` (6), `n_test_groups` (2), `embargo`. Test entries carry the backtest `path` they belong to (one entry per path); `WHERE role = 'test' AND path = k` is a complete out-of-sample backtest |
+
+```sql
+-- 5-fold cross-validated RMSE of a random forest
+WITH folds AS (
+    SELECT unnest(ml_cv_splits_agg(id, 'kfold', '{"n_splits": 5, "shuffle": true}' ORDER BY id), recursive := true)
+    FROM train),
+f AS (SELECT * FROM folds JOIN train USING (id)),
+models AS (
+    SELECT split, ml_fit_agg('RandomForestRegressor', y, [x1, x2]) AS model
+    FROM f WHERE role = 'train' GROUP BY split)
+SELECT avg(rmse), stddev(rmse) FROM (
+    SELECT split, ml_rmse(y, ml_predict(model, [x1, x2])) AS rmse
+    FROM f JOIN models USING (split) WHERE role = 'test' GROUP BY split);
+```
 
 ### Roadmap
 
 | Topic | Issue |
 |---|---|
-| Metric aggregates (`ml_r2`, `ml_rmse`, `ml_roc_auc`, `ml_log_loss`, …) | [#1](https://github.com/DataZooDE/anofox-ml/issues/1) |
-| Fit-predict table macros (`ml_fit_predict_by`, `ml_cluster_by`, …) | [#2](https://github.com/DataZooDE/anofox-ml/issues/2) |
-| Sample weights and a memory guard for large groups | [#3](https://github.com/DataZooDE/anofox-ml/issues/3) |
+| Spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
-| Conformal prediction intervals | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
+| Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Parallelism within a single fit | [#7](https://github.com/DataZooDE/anofox-ml/issues/7) |
+| Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
 ## 🧮 Estimators
 
@@ -212,11 +365,12 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 
 ## 📝 Behaviour Notes
 
-- **NULLs:** rows with a NULL target, feature list or weight are skipped when fitting. The per-row aggregates return a NULL entry for such rows.
+- **NULLs:** rows with a NULL target, weight, feature list or NULL value inside the feature list are skipped when fitting, and predict NULL. The per-row aggregates return a NULL entry for such rows.
 - **Weights:** kinds without weighted fitting reject a `weight` with an error naming the kind.
 - **Row order:** `ml_cluster_agg`, `ml_outlier_score_agg` and `ml_fit_transform_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
-- **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`.
+- **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`. With `VARCHAR` targets, the sorted distinct labels are stored as `labels`, the model learns their index, and `classes` / `ml_predict_proba` columns follow the label order.
 - **Feature count:** predicting with a feature list of the wrong length is an error.
+- **Memory:** a fitting aggregate holds its group's training set in memory. `SET anofox_ml_max_fit_values = n` caps it per group (rows × features, default 100 million ≈ 800 MB; `0` = unlimited). Past the cap the query fails with a hint; sample large groups with `USING SAMPLE` before fitting.
 - **Parallelism:** DuckDB parallelises across groups. Each fit currently runs single-threaded inside a DuckDB worker, so an ungrouped fit uses one core. [#7](https://github.com/DataZooDE/anofox-ml/issues/7) proposes letting a single fit use the idle cores.
 - **Determinism:** estimators with randomness take a `seed` parameter with a fixed default, so the same query gives the same model.
 
@@ -262,10 +416,10 @@ cargo clippy --all-targets        # lint
 | Path | Contents |
 |---|---|
 | `src/` | C++ extension: thin DuckDB wrappers around the C ABI |
-| `crates/anofox-ml-ffi/` | Rust `staticlib`: generic C ABI over [`anofox-ml-registry`](https://github.com/sipemu/anofox-ml/tree/master/crates/anofox-ml-registry) |
+| `crates/anofox-ml-ffi/` | Rust `staticlib`: generic C ABI over [`anofox-ml-registry`](https://crates.io/crates/anofox-ml-registry) |
 | `test/sql/` | sqllogictests |
 
-The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml). The registry crate is consumed from its `master` branch until it is published on crates.io.
+The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml) 0.2 on crates.io (`anofox-ml-registry`, `-core`, `-metrics`, `-conformal`, `-text`).
 
 ### Verify Installation
 

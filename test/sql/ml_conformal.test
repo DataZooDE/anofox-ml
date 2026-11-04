@@ -1,0 +1,109 @@
+# name: test/sql/ml_conformal.test
+# description: split conformal prediction intervals and sets
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# y = 2x + uniform noise in [-3, 3]; part 0 trains, 1 calibrates, 2 tests.
+statement ok
+CREATE TABLE d AS SELECT i AS id, (i % 100) / 10.0 AS x,
+    2 * ((i % 100) / 10.0) + ((hash(i) % 2001) / 1000.0 - 1.0) * 3 AS y,
+    CASE WHEN hash(i, 'z') % 10 < 2 THEN ['a', 'b', 'c'][(hash(i, 'c') % 3)::BIGINT + 1]
+         WHEN (i % 100) < 50 THEN 'lo' ELSE 'hi' END AS lab,
+    i % 3 AS part
+FROM range(6000) t(i);
+
+statement ok
+CREATE TABLE m AS SELECT ml_fit_agg('OlsRegressor', y, [x]) AS model FROM d WHERE part = 0;
+
+statement ok
+CREATE TABLE c AS SELECT ml_conformalize_agg(model, y, [x]) AS model FROM d, m WHERE part = 1 GROUP BY ALL;
+
+# coverage on the test rows is close to 1 - alpha, and intervals narrow as alpha grows
+query III
+SELECT a, abs(avg((y BETWEEN pi.lower AND pi.upper)::INT) - (1 - a)) < 0.05, avg(pi.upper - pi.lower) > 0
+FROM (SELECT a, y, ml_predict_interval(model, [x], a) AS pi FROM d, c, (VALUES (0.1), (0.2), (0.5)) v(a) WHERE part = 2)
+GROUP BY a ORDER BY a;
+----
+0.1	true	true
+0.2	true	true
+0.5	true	true
+
+query I
+SELECT ml_predict_interval(model, [1.0], 0.1).upper - ml_predict_interval(model, [1.0], 0.1).lower
+     > ml_predict_interval(model, [1.0], 0.5).upper - ml_predict_interval(model, [1.0], 0.5).lower FROM c;
+----
+true
+
+# the interval is centred on the point prediction, with the model-free margin as half width
+query I
+SELECT abs((pi.upper - pi.lower) / 2 - (SELECT ml_conformal_margin(y, ml_predict(model, [x]), 0.1) FROM d, m WHERE part = 1)) < 1e-9
+   AND abs((pi.upper + pi.lower) / 2 - ml_predict(model, [3.0])) < 1e-9
+FROM (SELECT ml_predict_interval(model, [3.0], 0.1) AS pi, model FROM c);
+----
+true
+
+# too few calibration rows for alpha: unbounded
+query II
+SELECT pi.lower, pi.upper FROM (SELECT ml_predict_interval(model, [1.0], 0.0001) AS pi FROM c);
+----
+-inf	inf
+
+# a NULL alpha gives NULL; the calibrated model still predicts
+query II
+SELECT ml_predict_interval(model, [1.0], NULL) IS NULL, ml_predict(model, [1.0]) = (SELECT ml_predict(model, [1.0]) FROM m) FROM c;
+----
+true	true
+
+# classification: sets of string labels with coverage close to 1 - alpha
+statement ok
+CREATE TABLE mc AS SELECT ml_fit_agg('RandomForestClassifier', lab, [x], '{"n_estimators": 30}') AS model FROM d WHERE part = 0;
+
+statement ok
+CREATE TABLE cc AS SELECT ml_conformalize_agg(model, lab, [x]) AS model FROM d, mc WHERE part = 1 GROUP BY ALL;
+
+query II
+SELECT a, abs(avg(list_contains(s, lab)::INT) - (1 - a)) < 0.05
+FROM (SELECT a, lab, ml_predict_set(model, [x], a) AS s FROM d, cc, (VALUES (0.05), (0.1), (0.3)) v(a) WHERE part = 2)
+GROUP BY a ORDER BY a;
+----
+0.05	true
+0.10	true
+0.30	true
+
+# smaller alpha, larger sets
+query I
+SELECT avg(len(ml_predict_set(model, [x], 0.05))) > avg(len(ml_predict_set(model, [x], 0.3))) FROM d, cc WHERE part = 2;
+----
+true
+
+# per group
+query I
+SELECT count(*) FROM (
+    SELECT g, ml_conformalize_agg(model, y, [x]) AS model
+    FROM (SELECT part AS g, * FROM d WHERE part > 0), m GROUP BY g, model);
+----
+2
+
+statement error
+SELECT ml_predict_interval(model, [1.0], 0.1) FROM m;
+----
+not conformalized
+
+statement error
+SELECT ml_predict_set(model, [1.0], 0.1) FROM c;
+----
+need a classifier
+
+statement error
+SELECT ml_predict_interval(model, [1.0], 1.5) FROM c;
+----
+alpha must lie in (0, 1)
+
+statement error
+SELECT ml_conformalize_agg(model, 'zebra', [x]) FROM d, mc WHERE part = 1;
+----
+not a label of the model

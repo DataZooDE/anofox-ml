@@ -1,0 +1,136 @@
+# name: test/sql/ml_metrics.test
+# description: metric aggregates against scikit-learn reference values
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# Reference values come from scikit-learn 1.x:
+#   y  = [3, -0.5, 2, 7, 4.2]; yh = [2.5, 0.0, 2, 8, 4.0]
+#   yt = [0,1,2,0,1,2,1,1];    yp = [0,2,1,0,0,1,1,1];  w = [1,2,1,1,3,1,1,2]
+#   yb = [0,0,1,1,1,0,1,0];    s  = [.1,.4,.35,.8,.7,.2,.9,.6]
+statement ok
+CREATE TABLE reg AS SELECT * FROM (VALUES (1, 3.0, 2.5), (2, -0.5, 0.0), (3, 2.0, 2.0), (4, 7.0, 8.0), (5, 4.2, 4.0)) t(i, y, yh);
+
+statement ok
+CREATE TABLE cls AS SELECT * FROM (VALUES
+    (1, 0.0, 0.0, 1.0, 0.0, 0.1), (2, 1.0, 2.0, 2.0, 0.0, 0.4), (3, 2.0, 1.0, 1.0, 1.0, 0.35), (4, 0.0, 0.0, 1.0, 1.0, 0.8),
+    (5, 1.0, 0.0, 3.0, 1.0, 0.7), (6, 2.0, 1.0, 1.0, 0.0, 0.2), (7, 1.0, 1.0, 1.0, 1.0, 0.9), (8, 1.0, 1.0, 2.0, 0.0, 0.6)
+) t(i, yt, yp, w, yb, s);
+
+# regression
+query I
+SELECT list_bool_and([abs(v[1] - v[2]) < 1e-9 for v in [
+    [ml_r2(y, yh), 0.9496600418410042],
+    [ml_mse(y, yh), 0.308],
+    [ml_rmse(y, yh), 0.5549774770204643],
+    [ml_mae(y, yh), 0.44],
+    [ml_mape(y, yh), 0.27142857142857146],
+    [ml_median_absolute_error(y, yh), 0.5],
+    [ml_max_error(y, yh), 1.0],
+    [ml_explained_variance(y, yh), 0.9538441422594142]]]) FROM reg;
+----
+true
+
+# classification on labels
+query I
+SELECT list_bool_and([abs(v[1] - v[2]) < 1e-9 for v in [
+    [ml_accuracy(yt, yp), 0.5],
+    [ml_accuracy(yt, yp, '{}', w), 0.4166666666666667],
+    [ml_f1(yt, yp, '{"average": "macro"}'), 0.43333333333333335],
+    [ml_f1(yt, yp, '{"average": "weighted"}', w), 0.402930402930403],
+    [ml_precision(yt, yp, '{"average": "micro"}'), 0.5],
+    [ml_recall(yt, yp, '{"average": "macro"}'), 0.5],
+    [ml_fbeta(yt, yp, '{"average": "macro", "beta": 2}'), 0.4696969696969697],
+    [ml_balanced_accuracy(yt, yp), 0.5],
+    [ml_cohen_kappa(yt, yp), 0.2],
+    [ml_adjusted_rand(yt, yp), 0.07228915662650602],
+    [ml_normalized_mutual_info(yt, yp), 0.45128734036668616]]]) FROM cls;
+----
+true
+
+# binary scores and probabilities; f1 defaults to average = binary, pos_label = 1
+query I
+SELECT list_bool_and([abs(v[1] - v[2]) < 1e-9 for v in [
+    [ml_roc_auc(yb, s), 0.875],
+    [ml_roc_auc(yb, s, '{}', w), 0.888888888888889],
+    [ml_average_precision(yb, s), 0.9166666666666666],
+    [ml_log_loss(yb, s), 0.4363276947527035],
+    [ml_brier_score(yb, s), 0.1415625],
+    [ml_f1(yb, (s > 0.5)::DOUBLE), 0.75],
+    [ml_matthews_corrcoef(yb, (s > 0.5)::DOUBLE), 0.5]]]) FROM cls;
+----
+true
+
+# multiclass probabilities as DOUBLE[] (columns in sorted label order)
+query I
+SELECT list_bool_and([abs(v[1] - v[2]) < 1e-9 for v in [
+    [ml_log_loss(y, p), 0.631045300020431],
+    [ml_roc_auc(y, p), 0.9814814814814815],
+    [ml_roc_auc(y, p, '{"multi_class": "ovo"}'), 0.9722222222222222]]])
+FROM (VALUES (0.0, [.7, .2, .1]), (1.0, [.1, .6, .3]), (2.0, [.2, .2, .6]), (0.0, [.5, .3, .2]), (2.0, [.3, .4, .3]), (2.0, [.1, .3, .6])) t(y, p);
+----
+true
+
+# clustering
+query I
+SELECT abs(ml_silhouette(x, l) - 0.8398163312586742) < 1e-9
+FROM (VALUES ([0.0, 0.0], 0.0), ([0.0, 1.0], 0.0), ([1.0, 0.0], 0.0), ([5.0, 5.0], 1.0), ([5.0, 6.0], 1.0), ([6.0, 5.0], 1.0)) t(x, l);
+----
+true
+
+# intervals: 3 of 4 inside; interval score = width + (2 / alpha) * miss
+query II
+SELECT ml_coverage(y, lo, hi), ml_interval_score(y, lo, hi, 0.5)
+FROM (VALUES (1.0, 0.0, 2.0), (1.0, 0.0, 2.0), (3.0, 0.0, 2.0), (1.0, 0.0, 2.0)) t(y, lo, hi);
+----
+0.75	3.0
+
+# per group, and independent of row order
+query II
+SELECT g, ml_rmse(y, yh) = (SELECT ml_rmse(y, yh) FROM (SELECT * FROM reg ORDER BY i DESC) r WHERE r.i % 2 = g)
+FROM (SELECT i % 2 AS g, * FROM reg) GROUP BY g ORDER BY g;
+----
+0	true
+1	true
+
+# rows with a NULL side are skipped; an empty group gives NULL
+query II
+SELECT ml_mse(y, yh), ml_mse(y, yh) FILTER (WHERE false) FROM (VALUES (1.0, 1.0), (2.0, NULL), (NULL, 5.0), (3.0, 5.0)) t(y, yh);
+----
+2.0	NULL
+
+# a NULL weight skips the row
+query I
+SELECT ml_accuracy(y, p, '{}', w) FROM (VALUES (1.0, 1.0, 1.0), (1.0, 0.0, NULL)) t(y, p, w);
+----
+1.0
+
+# errors
+statement error
+SELECT ml_f1(yt, yp) FROM cls;
+----
+multiclass
+
+statement error
+SELECT ml_f1(yt, yp, '{"avg": "macro"}') FROM cls;
+----
+unknown field
+
+statement error
+SELECT ml_log_loss(y, p) FROM (VALUES (0.0, [0.5, 0.5]), (1.0, [1.0])) t(y, p);
+----
+every row must have 2 values
+
+statement error
+SELECT ml_r2(1.0, 1.0, 'x');
+----
+No function matches
+
+# matthews_corrcoef is binary-only in anofox-ml 0.2.0 (scikit-learn also supports multiclass)
+statement error
+SELECT ml_matthews_corrcoef(yt, yp) FROM cls;
+----
+binary labels

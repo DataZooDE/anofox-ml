@@ -1,0 +1,68 @@
+# name: test/sql/ml_inspect.test
+# description: permutation feature importance
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# y depends strongly on a, weakly on b, not at all on noise.
+statement ok
+CREATE TABLE d AS SELECT i AS id, (i % 20)::DOUBLE AS a, ((i * 7919) % 13)::DOUBLE AS noise, ((i * 31) % 11)::DOUBLE AS b,
+    3.0 * (i % 20) + 0.5 * ((i * 31) % 11) AS y, (i % 20 >= 10)::DOUBLE AS c, CASE WHEN i % 20 >= 10 THEN 'high' ELSE 'low' END AS cl
+FROM range(400) t(i);
+
+statement ok
+CREATE TABLE m AS SELECT ml_fit_agg('OlsRegressor', y, [a, noise, b]) AS model FROM d;
+
+query IIII
+SELECT list_transform(imp, s -> s.feature),
+       imp[1].importance_mean > imp[3].importance_mean,
+       imp[3].importance_mean > 0,
+       abs(imp[2].importance_mean) < 1e-6
+FROM (SELECT ml_permutation_importance_agg(model, y, [a, noise, b], '{"seed": 0}') AS imp FROM d, m GROUP BY model);
+----
+[1, 2, 3]	true	true	true
+
+# a loss metric is negated, so a useful feature still has a positive importance
+query II
+SELECT imp[1].importance_mean > 0, abs(imp[2].importance_mean) < 1e-6
+FROM (SELECT ml_permutation_importance_agg(model, y, [a, noise, b], '{"metric": "rmse", "n_repeats": 3}') AS imp FROM d, m GROUP BY model);
+----
+true	true
+
+# seeded: reproducible
+query I
+SELECT a = b FROM (
+    SELECT ml_permutation_importance_agg(model, y, [a, noise, b], '{"seed": 3}') AS a,
+           ml_permutation_importance_agg(model, y, [a, noise, b], '{"seed": 3}') AS b FROM d, m GROUP BY model);
+----
+true
+
+# classifiers: accuracy by default, probability metrics, string labels
+query II
+SELECT imp[1].importance_mean > 0.3, imp[2].importance_mean = 0
+FROM (SELECT ml_permutation_importance_agg(model, c, [a, noise]) AS imp
+      FROM d, (SELECT ml_fit_agg('DecisionTreeClassifier', c, [a, noise], '{"max_depth": 1}') AS model FROM d) GROUP BY model);
+----
+true	true
+
+query II
+SELECT imp[1].importance_mean > 0.3, imp[2].importance_mean = 0
+FROM (SELECT ml_permutation_importance_agg(model, c, [a, noise], '{"metric": "roc_auc"}') AS imp
+      FROM d, (SELECT ml_fit_agg('DecisionTreeClassifier', c, [a, noise], '{"max_depth": 1}') AS model FROM d) GROUP BY model);
+----
+true	true
+
+query I
+SELECT imp[1].importance_mean > 0.3
+FROM (SELECT ml_permutation_importance_agg(model, cl, [a, noise], '{"metric": "log_loss"}') AS imp
+      FROM d, (SELECT ml_fit_agg('RandomForestClassifier', cl, [a, noise], '{"n_estimators": 10}') AS model FROM d) GROUP BY model);
+----
+true
+
+statement error
+SELECT ml_permutation_importance_agg(model, y, [a, noise, b], '{"repeats": 3}') FROM d, m GROUP BY model;
+----
+unknown field

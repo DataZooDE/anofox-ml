@@ -1,0 +1,84 @@
+# name: test/sql/ml_labels.test
+# description: classifiers on string class labels
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+statement ok
+CREATE TABLE iris AS SELECT i AS id, (i % 15)::DOUBLE AS a, ((i * 7) % 3)::DOUBLE AS b,
+    ['setosa', 'virginica', 'versicolor'][(i % 15) // 5 + 1] AS species, 'g' || (i % 2) AS g
+FROM range(90) t(i);
+
+statement ok
+CREATE TABLE m AS SELECT ml_fit_agg('DecisionTreeClassifier', species, [a, b]) AS model FROM iris;
+
+# labels predict back; classes are the sorted label indices
+query I
+SELECT bool_and(ml_predict_label(model, [a, b]) = species) FROM iris, m;
+----
+true
+
+query II
+SELECT ml_model_info(model).labels, ml_model_info(model).classes FROM m;
+----
+[setosa, versicolor, virginica]	[0.0, 1.0, 2.0]
+
+# ml_predict returns the label index; probabilities follow the labels
+query II
+SELECT ml_predict(model, [0.0, 0.0]), ml_predict_proba(model, [0.0, 0.0]) FROM m;
+----
+0.0	[1.0, 0.0, 0.0]
+
+# per group, with params and weights
+query I
+SELECT count(*) FROM (
+    SELECT g, ml_fit_agg('RandomForestClassifier', species, [a, b], '{"n_estimators": 10}', 1.0) AS model
+    FROM iris GROUP BY g);
+----
+2
+
+# rows with a NULL label are skipped
+query I
+SELECT ml_model_info(ml_fit_agg('KnnClassifier', CASE WHEN species = 'setosa' THEN NULL ELSE species END, [a, b])).labels FROM iris;
+----
+[versicolor, virginica]
+
+# numeric models give the class as text
+query I
+SELECT DISTINCT ml_predict_label(ml_fit_agg('DecisionTreeClassifier', (a > 7)::INT::DOUBLE, [a]) OVER (), [a]) FROM iris WHERE a = 0;
+----
+0
+
+# label metrics take strings
+query III
+SELECT ml_accuracy(species, ml_predict_label(model, [a, b])),
+       ml_f1(species, ml_predict_label(model, [a, b]), '{"average": "macro"}'),
+       ml_accuracy(s, p)
+FROM iris, m, (VALUES ('x', 'x'), ('y', 'x')) t(s, p);
+----
+1.0	1.0	0.5
+
+query I
+SELECT ml_f1(s, p, '{"pos_label": "yes"}') FROM (VALUES ('yes', 'yes'), ('yes', 'no'), ('no', 'no'), ('no', 'yes')) t(s, p);
+----
+0.5
+
+query I
+SELECT ml_accuracy(s, p, '{}', w) FROM (VALUES ('a', 'a', 3.0), ('a', 'b', 1.0)) t(s, p, w);
+----
+0.75
+
+statement error
+SELECT ml_f1(s, p, '{"pos_label": "maybe"}') FROM (VALUES ('yes', 'yes'), ('no', 'no')) t(s, p);
+----
+does not occur
+
+# through the table macros: prediction is the label index, proba follows the labels
+query III
+SELECT count(*), bool_and(labels[prediction::INT + 1] = species), bool_and(label = species)
+FROM ml_fit_predict_proba_by('iris', g, species, [a, b], 'DecisionTreeClassifier');
+----
+90	true	true

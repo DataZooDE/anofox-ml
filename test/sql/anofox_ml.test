@@ -265,3 +265,51 @@ statement error
 SELECT ml_model_fitted('garbage'::BLOB);
 ----
 not an anofox_ml model
+
+# A NULL inside a feature list: the row is skipped when fitting and predicts NULL.
+query II
+SELECT ml_predict(m, [1.0, NULL]) IS NULL, ml_predict(m, [1.0, 1.0]) FROM (
+    SELECT ml_fit_agg('OlsRegressor', y, [a, b]) AS m
+    FROM (VALUES (1.0, 0.0, 1.0), (2.0, 1.0, 1.0), (3.0, 2.0, 1.0), (99.0, NULL, 1.0)) t(y, a, b));
+----
+true	2.0
+
+query I
+SELECT ml_cluster_agg('KMeans', x, '{"n_clusters": 2}' ORDER BY id)[2] IS NULL
+FROM (VALUES (1, [0.0]), (2, [NULL::DOUBLE]), (3, [5.0]), (4, [0.1]), (5, [5.1])) t(id, x);
+----
+true
+
+# Memory guard: rows x features per group.
+statement ok
+SET anofox_ml_max_fit_values = 100;
+
+statement ok
+SELECT ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE, 1.0]) FROM range(50) t(i);
+
+statement error
+SELECT ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE, 1.0]) FROM range(51) t(i);
+----
+anofox_ml_max_fit_values
+
+# The limit applies per group, and to the per-row aggregates.
+statement ok
+SELECT i % 2 AS g, ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE, 1.0]) FROM range(100) t(i) GROUP BY g;
+
+statement error
+SELECT ml_cluster_agg('KMeans', [i::DOUBLE, 1.0]) FROM range(51) t(i);
+----
+anofox_ml_max_fit_values
+
+# USING SAMPLE keeps a fit under the limit.
+statement ok
+SELECT ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE, 1.0]) FROM (FROM range(1000) t(i) USING SAMPLE 40 ROWS);
+
+statement ok
+SET anofox_ml_max_fit_values = 0;
+
+statement ok
+SELECT ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE, 1.0]) FROM range(1000) t(i);
+
+statement ok
+RESET anofox_ml_max_fit_values;

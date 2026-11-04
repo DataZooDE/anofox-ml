@@ -21,6 +21,9 @@ jobs:
       extension_name: anofox_ml
       enable_rust: true
       reduced_ci_mode: disabled
+      # The wasm images of extension-ci-tools v1.5.6 ship rustc 1.86, but
+      # anofox-ml 0.2.0 needs 1.87 (DataZooDE/anofox-ml#29).
+      exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
 
   build-and-test-rust:
     name: Build and test Rust components

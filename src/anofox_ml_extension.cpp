@@ -56,6 +56,7 @@ void LoadInternal(ExtensionLoader &loader) {
     telemetry.CaptureExtensionLoad("anofox_ml", ExtensionVersion());
 #endif
     RegisterMlFunctions(loader);
+    RegisterMlMetrics(loader);
 }
 
 void AnofoxMlExtension::Load(ExtensionLoader &loader) {

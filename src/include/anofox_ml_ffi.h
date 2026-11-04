@@ -52,6 +52,11 @@ char *anofox_ml_fit_apply(const char *kind, const char *params, const double *x,
                           const double *y, const double *w, const char *methods, AnofoxMlDoubles *out,
                           size_t *out_cols);
 
+// Metric `name` (r2, f1, roc_auc, ...) with JSON `options` (may be NULL) on n
+// rows: y_true holds n doubles, y_pred n * n_cols (row-major), w n or NULL.
+char *anofox_ml_metric(const char *name, const char *options, const double *y_true, const double *y_pred, size_t n,
+                       size_t n_cols, const double *w, double *out);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

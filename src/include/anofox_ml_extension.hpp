@@ -7,6 +7,7 @@ namespace duckdb {
 class ExtensionLoader;
 
 void RegisterMlFunctions(ExtensionLoader &loader);
+void RegisterMlMetrics(ExtensionLoader &loader);
 
 class AnofoxMlExtension : public Extension {
 public:

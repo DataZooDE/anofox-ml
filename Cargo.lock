@@ -244,6 +244,7 @@ name = "anofox_ml_ffi"
 version = "0.1.0"
 dependencies = [
  "anofox-ml-core",
+ "anofox-ml-metrics",
  "anofox-ml-registry",
  "ndarray",
  "rayon",

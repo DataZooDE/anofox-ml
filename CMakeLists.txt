@@ -111,6 +111,7 @@ include_directories(src/include)
 set(EXTENSION_SOURCES
     src/anofox_ml_extension.cpp
     src/functions/ml_functions.cpp
+    src/functions/ml_metrics.cpp
 )
 
 # Build static extension

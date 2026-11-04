@@ -15,7 +15,7 @@
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 104 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. Metrics, fit-predict table macros and tuning are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested. Fit-predict table macros, cross-validation and tuning are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
 
 ## ✨ Key Features
@@ -114,12 +114,13 @@ SELECT store,
 FROM train
 GROUP BY store;
 
--- predict with the stored models and compute the RMSE per store
+-- predict with the stored models and evaluate per store
 SELECT store,
-       sqrt(avg(power(units - ml_predict(m.model, [price, promo, dow]), 2))) AS rmse
+       ml_rmse(units, ml_predict(m.model, [price, promo, dow])) AS rmse,
+       ml_r2(units, ml_predict(m.model, [price, promo, dow])) AS r2
 FROM test t JOIN models m USING (store)
 GROUP BY store ORDER BY store;
--- store_0 ≈ 1.59, store_1 ≈ 1.70, store_2 ≈ 1.84
+-- rmse: store_0 ≈ 1.59, store_1 ≈ 1.70, store_2 ≈ 1.84
 
 -- what is stored in a model
 SELECT store, ml_model_info(model).kind, ml_model_info(model).n_features FROM models;
@@ -139,8 +140,13 @@ FROM train ORDER BY score LIMIT 3;
 More patterns:
 
 ```sql
--- class probabilities, in the order of the stored classes
+-- class probabilities, in the order of the stored classes, and their scores
 SELECT ml_model_info(model).classes, ml_predict_proba(model, [x1, x2])
+FROM churn_model, customers;
+
+SELECT ml_roc_auc(churned, ml_predict_proba(model, [x1, x2])[2]) AS auc,
+       ml_log_loss(churned, ml_predict_proba(model, [x1, x2])) AS log_loss,
+       ml_f1(churned, ml_predict(model, [x1, x2])) AS f1
 FROM churn_model, customers;
 
 -- unsupervised fit: standardise features, then transform
@@ -179,16 +185,30 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
+### Metrics
+
+Aggregates over `(y_true, y_pred)`: no model is needed, so they score any prediction, per group or over the whole table. Rows with a NULL argument are skipped and an empty group gives NULL. They are computed by anofox-ml's metrics crate and match scikit-learn.
+
+| Function | Description |
+|---|---|
+| `ml_r2`, `ml_mse`, `ml_rmse`, `ml_mae`, `ml_mape`, `ml_median_absolute_error`, `ml_max_error`, `ml_explained_variance`, `ml_mean_squared_log_error` `(y, y_pred)` | Regression |
+| `ml_accuracy`, `ml_precision`, `ml_recall`, `ml_f1`, `ml_fbeta` `(y, y_pred [, options [, weight]])` | Classification on labels. `options` JSON: `average` (`binary` default, `macro`, `micro`, `weighted`), `pos_label`, `zero_division` (`0`, `1`, `"nan"`), `labels`, `beta` |
+| `ml_balanced_accuracy`, `ml_matthews_corrcoef` (binary), `ml_cohen_kappa` `(y, y_pred)` | Classification on labels |
+| `ml_roc_auc`, `ml_log_loss` `(y, score DOUBLE \| proba DOUBLE[] [, options [, weight]])` | Binary score or per-class probabilities (columns in sorted label order, or `labels`). ROC AUC options: `multi_class` (`ovr`, `ovo`), `average` |
+| `ml_brier_score(y, p [, options [, weight]])`, `ml_average_precision(y, score)` | Binary probabilities and scores |
+| `ml_adjusted_rand`, `ml_normalized_mutual_info` `(labels_true, labels_pred)`, `ml_silhouette(x DOUBLE[], label)` | Clustering |
+| `ml_coverage(y, lower, upper)`, `ml_interval_score(y, lower, upper, alpha)` | Prediction intervals |
+
 ### Roadmap
 
 | Topic | Issue |
 |---|---|
-| Metric aggregates (`ml_r2`, `ml_rmse`, `ml_roc_auc`, `ml_log_loss`, …) | [#1](https://github.com/DataZooDE/anofox-ml/issues/1) |
 | Fit-predict table macros (`ml_fit_predict_by`, `ml_cluster_by`, …) | [#2](https://github.com/DataZooDE/anofox-ml/issues/2) |
 | Sample weights and a memory guard for large groups | [#3](https://github.com/DataZooDE/anofox-ml/issues/3) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Conformal prediction intervals | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Parallelism within a single fit | [#7](https://github.com/DataZooDE/anofox-ml/issues/7) |
+| Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
 ## 🧮 Estimators
 

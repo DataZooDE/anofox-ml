@@ -81,8 +81,11 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
-# --- Telemetry (disabled on MinGW where vcpkg cannot build OpenSSL) ---
-if(NOT MINGW)
+# --- Telemetry (disabled on MinGW and WASM) ---
+# MinGW: vcpkg cannot build OpenSSL there.
+# WASM: the telemetry load event is a raw HTTPS request, which DuckDB-Wasm
+# has no socket layer for (as in anofox-statistics).
+if(NOT MINGW AND NOT EMSCRIPTEN)
     find_package(OpenSSL REQUIRED)
 
     add_library(posthog_telemetry_obj OBJECT
@@ -101,7 +104,7 @@ if(NOT MINGW)
     target_compile_definitions(posthog_telemetry_obj PRIVATE ANOFOX_TELEMETRY_ENABLED)
     set(ANOFOX_TELEMETRY_ENABLED ON)
 else()
-    message(STATUS "Telemetry disabled: OpenSSL not available on MinGW")
+    message(STATUS "Telemetry disabled (MinGW or WASM)")
     set(ANOFOX_TELEMETRY_ENABLED OFF)
 endif()
 
@@ -122,6 +125,13 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 
 # Build loadable extension
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+# posthog-telemetry reads the machine id from the IORegistry on macOS, which
+# needs IOKit and CoreFoundation linked explicitly.
+if(APPLE AND ANOFOX_TELEMETRY_ENABLED)
+    target_link_libraries(${EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
+endif()
 
 # Link to Rust library
 target_link_libraries(${EXTENSION_NAME} anofox_ml_ffi-static)

@@ -171,9 +171,45 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
     }
 }
 
+// The memory guard of the fitting aggregates, read from the
+// anofox_ml_max_fit_values setting at bind time.
+struct FitBindData : public FunctionData {
+    explicit FitBindData(uint64_t max_values_p) : max_values(max_values_p) {
+    }
+    uint64_t max_values; // 0 = unlimited
+    unique_ptr<FunctionData> Copy() const override {
+        return make_uniq<FitBindData>(max_values);
+    }
+    bool Equals(const FunctionData &other) const override {
+        return max_values == other.Cast<FitBindData>().max_values;
+    }
+};
+
+unique_ptr<FunctionData> FitBind(ClientContext &context, AggregateFunction &, vector<unique_ptr<Expression>> &) {
+    Value v;
+    uint64_t max_values = 100000000;
+    if (context.TryGetCurrentSetting("anofox_ml_max_fit_values", v) && !v.IsNull()) {
+        max_values = v.GetValue<uint64_t>();
+    }
+    return make_uniq<FitBindData>(max_values);
+}
+
+void CheckFitSize(const AggregateInputData &aggr, idx_t n_values) {
+    if (!aggr.bind_data) {
+        return;
+    }
+    auto max_values = aggr.bind_data->Cast<FitBindData>().max_values;
+    if (max_values > 0 && n_values > max_values) {
+        throw InvalidInputException(
+            "the training set of one group exceeds anofox_ml_max_fit_values (%llu rows x features); sample it "
+            "(e.g. FROM t USING SAMPLE 1000000 ROWS) or raise the limit with SET anofox_ml_max_fit_values = ...",
+            (unsigned long long)max_values);
+    }
+}
+
 // Inputs: kind, [y,] x [, params [, weight]]; y is a string label when LABELS.
 template <bool HAS_Y, bool HAS_W = false, bool LABELS = false>
-void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
+void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
     UnifiedVectorFormat kind_data, y_data, x_data, params_data, w_data, sdata;
     inputs[0].ToUnifiedFormat(count, kind_data);
@@ -245,10 +281,11 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
         }
         s.n_rows++;
         s.used->push_back(1);
+        CheckFitSize(aggr, s.x->size());
     }
 }
 
-void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &, idx_t count) {
+void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &aggr, idx_t count) {
     auto sources = FlatVector::GetData<FitState *>(source_vector);
     auto targets = FlatVector::GetData<FitState *>(target_vector);
     for (idx_t i = 0; i < count; i++) {
@@ -274,6 +311,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
         tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
         tgt.n_rows += src.n_rows;
+        CheckFitSize(aggr, tgt.x->size());
     }
 }
 
@@ -918,7 +956,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     AggregateFunctionSet fit_set("ml_fit_agg");
     auto make_fit = [](vector<LogicalType> args, aggregate_update_t update) {
         AggregateFunction f("ml_fit_agg", std::move(args), LogicalType::BLOB, AggregateFunction::StateSize<FitState>,
-                            FitInitialize, update, FitCombine, FitFinalize, nullptr, nullptr, FitDestroy);
+                            FitInitialize, update, FitCombine, FitFinalize, nullptr, FitBind, FitDestroy);
         f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
         return f;
     };
@@ -946,7 +984,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         AggregateFunctionSet set(name);
         for (const auto &o : overloads) {
             AggregateFunction f(name, o.first, result, AggregateFunction::StateSize<FitState>, FitInitialize,
-                                o.second, FitCombine, finalize, nullptr, nullptr, FitDestroy);
+                                o.second, FitCombine, finalize, nullptr, FitBind, FitDestroy);
             f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
             set.AddFunction(f);
         }

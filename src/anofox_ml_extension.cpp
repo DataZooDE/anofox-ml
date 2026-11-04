@@ -49,6 +49,11 @@ static void RegisterTelemetryOptions(ExtensionLoader &loader) {
 #endif // ANOFOX_TELEMETRY_ENABLED
 
 void LoadInternal(ExtensionLoader &loader) {
+    auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+    config.AddExtensionOption("anofox_ml_max_fit_values",
+                              "Largest training set (rows x features) one fitting aggregate may hold in memory per "
+                              "group; 0 = unlimited",
+                              LogicalType::UBIGINT, Value::UBIGINT(100000000));
 #ifdef ANOFOX_TELEMETRY_ENABLED
     RegisterTelemetryOptions(loader);
     auto &telemetry = PostHogTelemetry::Instance();

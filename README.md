@@ -416,10 +416,10 @@ cargo clippy --all-targets        # lint
 | Path | Contents |
 |---|---|
 | `src/` | C++ extension: thin DuckDB wrappers around the C ABI |
-| `crates/anofox-ml-ffi/` | Rust `staticlib`: generic C ABI over [`anofox-ml-registry`](https://github.com/sipemu/anofox-ml/tree/master/crates/anofox-ml-registry) |
+| `crates/anofox-ml-ffi/` | Rust `staticlib`: generic C ABI over [`anofox-ml-registry`](https://crates.io/crates/anofox-ml-registry) |
 | `test/sql/` | sqllogictests |
 
-The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml). The registry crate is consumed from its `master` branch until it is published on crates.io.
+The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml) 0.2 on crates.io (`anofox-ml-registry`, `-core`, `-metrics`, `-conformal`, `-text`).
 
 ### Verify Installation
 

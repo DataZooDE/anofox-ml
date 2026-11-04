@@ -108,18 +108,20 @@ void EstimatorsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 }
 
 //===--------------------------------------------------------------------===//
-// ml_fit_agg(kind VARCHAR, y DOUBLE, x DOUBLE[] [, params VARCHAR]) -> BLOB
-// ml_fit_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR]) -> BLOB (unsupervised)
+// ml_fit_agg(kind VARCHAR, y DOUBLE, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB
+// ml_fit_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB (unsupervised)
 //===--------------------------------------------------------------------===//
 struct FitState {
     bool initialized;
     std::string *kind;
     std::string *params;
     bool has_y;
+    bool has_w;
     idx_t n_cols;
     idx_t n_rows;
     std::vector<double> *x;
     std::vector<double> *y;
+    std::vector<double> *w;
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -131,10 +133,12 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.kind = new std::string();
     s.params = new std::string();
     s.has_y = false;
+    s.has_w = false;
     s.n_cols = 0;
     s.n_rows = 0;
     s.x = new std::vector<double>();
     s.y = new std::vector<double>();
+    s.w = new std::vector<double>();
     s.used = new std::vector<uint8_t>();
 }
 
@@ -146,14 +150,16 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.params;
         delete s.x;
         delete s.y;
+        delete s.w;
         delete s.used;
     }
 }
 
-template <bool HAS_Y>
+// Inputs: kind, [y,] x [, params [, weight]].
+template <bool HAS_Y, bool HAS_W = false>
 void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
-    UnifiedVectorFormat kind_data, y_data, x_data, params_data, sdata;
+    UnifiedVectorFormat kind_data, y_data, x_data, params_data, w_data, sdata;
     inputs[0].ToUnifiedFormat(count, kind_data);
     if (HAS_Y) {
         inputs[1].ToUnifiedFormat(count, y_data);
@@ -162,6 +168,9 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
     const bool has_params = input_count > X + 1;
     if (has_params) {
         inputs[X + 1].ToUnifiedFormat(count, params_data);
+    }
+    if (HAS_W) {
+        inputs[X + 2].ToUnifiedFormat(count, w_data);
     }
     state_vector.ToUnifiedFormat(count, sdata);
 
@@ -178,15 +187,17 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
         auto ki = kind_data.sel->get_index(i);
         auto yi = HAS_Y ? y_data.sel->get_index(i) : 0;
         auto xi = x_data.sel->get_index(i);
+        auto wi = HAS_W ? w_data.sel->get_index(i) : 0;
         if (!kind_data.validity.RowIsValid(ki) || (HAS_Y && !y_data.validity.RowIsValid(yi)) ||
-            !x_data.validity.RowIsValid(xi)) {
-            s.used->push_back(0); // rows with a NULL kind, target or feature list are skipped
+            !x_data.validity.RowIsValid(xi) || (HAS_W && !w_data.validity.RowIsValid(wi))) {
+            s.used->push_back(0); // rows with a NULL kind, target, feature list or weight are skipped
             continue;
         }
         const auto &entry = lists[xi];
         if (!s.initialized) {
             s.initialized = true;
             s.has_y = HAS_Y;
+            s.has_w = HAS_W;
             *s.kind = kinds[ki].GetString();
             if (has_params) {
                 auto pi = params_data.sel->get_index(i);
@@ -210,6 +221,9 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
         if (HAS_Y) {
             s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
         }
+        if (HAS_W) {
+            s.w->push_back(UnifiedVectorFormat::GetData<double>(w_data)[wi]);
+        }
         s.n_rows++;
         s.used->push_back(1);
     }
@@ -228,6 +242,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         if (!tgt.initialized) {
             tgt.initialized = true;
             tgt.has_y = src.has_y;
+            tgt.has_w = src.has_w;
             *tgt.kind = *src.kind;
             *tgt.params = *src.params;
             tgt.n_cols = src.n_cols;
@@ -236,6 +251,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         }
         tgt.x->insert(tgt.x->end(), src.x->begin(), src.x->end());
         tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
+        tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
         tgt.n_rows += src.n_rows;
     }
 }
@@ -252,7 +268,7 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
         CaptureUse("ml_fit_agg");
         AnofoxMlBytes blob {nullptr, 0};
         Check(anofox_ml_fit(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
-                            s.has_y ? s.y->data() : nullptr, nullptr, &blob),
+                            s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr, &blob),
               "ml_fit_agg");
         FlatVector::GetData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
@@ -261,8 +277,8 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
 }
 
 //===--------------------------------------------------------------------===//
-// ml_cluster_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR]) -> BIGINT[]
-// ml_outlier_score_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR]) -> DOUBLE[]
+// ml_cluster_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BIGINT[]
+// ml_outlier_score_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> DOUBLE[]
 // Fit on the group and return one value per input row, in input order (use
 // ORDER BY inside the aggregate to fix it); skipped rows get NULL.
 //===--------------------------------------------------------------------===//
@@ -280,8 +296,9 @@ void RowsFinalize(Vector &state_vector, AggregateInputData &, Vector &result, id
         CaptureUse(FUNCTION);
         AnofoxMlDoubles out {nullptr, 0};
         size_t out_cols = 0;
-        Check(anofox_ml_fit_apply(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols, nullptr,
-                                  METHODS, &out, &out_cols),
+        Check(anofox_ml_fit_apply(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                  s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr, METHODS, &out,
+                                  &out_cols),
               FUNCTION);
         if (out_cols != 1) {
             anofox_ml_free_doubles(out);
@@ -305,6 +322,58 @@ void RowsFinalize(Vector &state_vector, AggregateInputData &, Vector &result, id
         anofox_ml_free_doubles(out);
         ListVector::SetListSize(result, list_offset + n);
         entries[row] = list_entry_t(list_offset, n);
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_fit_transform_agg(kind VARCHAR, [y DOUBLE,] x DOUBLE[] [, params VARCHAR]) -> DOUBLE[][]
+// The output of a fit on the group for each input row: the stored training
+// embedding (t-SNE, Isomap, LLE, MDS; TargetEncoder's cross-fitted encoding)
+// or else `transform` of the training rows. Row order as in RowsFinalize.
+//===--------------------------------------------------------------------===//
+void FitTransformFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+    static constexpr const char *FUNCTION = "ml_fit_transform_agg";
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    auto entries = FlatVector::GetData<list_entry_t>(result);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse(FUNCTION);
+        AnofoxMlDoubles out {nullptr, 0};
+        size_t out_cols = 0;
+        Check(anofox_ml_fit_apply(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                  s.has_y ? s.y->data() : nullptr, s.has_w ? s.w->data() : nullptr,
+                                  "embedding,transform", &out, &out_cols),
+              FUNCTION);
+        // Outer list: one entry per input row; inner list: out_cols values.
+        idx_t n = s.used->size();
+        idx_t outer_offset = ListVector::GetListSize(result);
+        ListVector::Reserve(result, outer_offset + n);
+        auto &rows = ListVector::GetEntry(result);
+        auto row_entries = FlatVector::GetData<list_entry_t>(rows);
+        auto &row_validity = FlatVector::Validity(rows);
+        idx_t value_offset = ListVector::GetListSize(rows);
+        ListVector::Reserve(rows, value_offset + s.n_rows * out_cols);
+        auto values = FlatVector::GetData<double>(ListVector::GetEntry(rows));
+        idx_t next = 0;
+        for (idx_t r = 0; r < n; r++) {
+            if ((*s.used)[r]) {
+                memcpy(values + value_offset, out.data + next * out_cols, out_cols * sizeof(double));
+                row_entries[outer_offset + r] = list_entry_t(value_offset, out_cols);
+                value_offset += out_cols;
+                next++;
+            } else {
+                row_validity.SetInvalid(outer_offset + r);
+            }
+        }
+        anofox_ml_free_doubles(out);
+        ListVector::SetListSize(rows, value_offset);
+        ListVector::SetListSize(result, outer_offset + n);
+        entries[row] = list_entry_t(outer_offset, n);
     }
 }
 
@@ -426,6 +495,18 @@ scalar_function_t MakeListFunction(const char *function, const char *method) {
 }
 
 //===--------------------------------------------------------------------===//
+// ml_model_fitted(model BLOB) -> VARCHAR (JSON of the fitted state)
+//===--------------------------------------------------------------------===//
+void MlModelFittedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t blob) {
+        char *json = nullptr;
+        Check(anofox_ml_model_fitted(reinterpret_cast<const uint8_t *>(blob.GetData()), blob.GetSize(), &json),
+              "ml_model_fitted");
+        return StringVector::AddString(result, TakeString(json));
+    });
+}
+
+//===--------------------------------------------------------------------===//
 // ml_model_info(model BLOB) -> STRUCT(kind, n_features, classes, capabilities,
 //                                     params, format_version, crate_version)
 //===--------------------------------------------------------------------===//
@@ -498,6 +579,8 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         ScalarFunction("ml_model_kind", {LogicalType::BLOB}, LogicalType::VARCHAR, MlModelKindFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_model_info", {LogicalType::BLOB}, ModelInfoType(), MlModelInfoFunction));
+    loader.RegisterFunction(
+        ScalarFunction("ml_model_fitted", {LogicalType::BLOB}, LogicalType::VARCHAR, MlModelFittedFunction));
     const vector<LogicalType> model_and_x {LogicalType::BLOB, LogicalType::LIST(LogicalType::DOUBLE)};
     loader.RegisterFunction(ScalarFunction("ml_predict", model_and_x, LogicalType::DOUBLE, MlPredictFunction));
     const std::pair<const char *, const char *> list_functions[] = {
@@ -524,22 +607,43 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         make_fit({LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR}, FitUpdate<true>));
     fit_set.AddFunction(make_fit({LogicalType::VARCHAR, features}, FitUpdate<false>));
     fit_set.AddFunction(make_fit({LogicalType::VARCHAR, features, LogicalType::VARCHAR}, FitUpdate<false>));
+    fit_set.AddFunction(make_fit(
+        {LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR, LogicalType::DOUBLE},
+        FitUpdate<true, true>));
+    fit_set.AddFunction(
+        make_fit({LogicalType::VARCHAR, features, LogicalType::VARCHAR, LogicalType::DOUBLE}, FitUpdate<false, true>));
     loader.RegisterFunction(fit_set);
 
-    auto make_rows = [&](const char *name, LogicalType element, aggregate_finalize_t finalize) {
+    using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;
+    auto make_rows = [&](const char *name, LogicalType result, aggregate_finalize_t finalize,
+                         const vector<Overload> &overloads) {
         AggregateFunctionSet set(name);
-        for (auto args : {vector<LogicalType> {LogicalType::VARCHAR, features},
-                          vector<LogicalType> {LogicalType::VARCHAR, features, LogicalType::VARCHAR}}) {
-            AggregateFunction f(name, std::move(args), LogicalType::LIST(element),
-                                AggregateFunction::StateSize<FitState>, FitInitialize, FitUpdate<false>, FitCombine,
-                                finalize, nullptr, nullptr, FitDestroy);
+        for (const auto &o : overloads) {
+            AggregateFunction f(name, o.first, result, AggregateFunction::StateSize<FitState>, FitInitialize,
+                                o.second, FitCombine, finalize, nullptr, nullptr, FitDestroy);
             f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
             set.AddFunction(f);
         }
         loader.RegisterFunction(set);
     };
-    make_rows(kClusterAgg, LogicalType::BIGINT, RowsFinalize<kClusterAgg, kClusterMethods, int64_t>);
-    make_rows(kOutlierAgg, LogicalType::DOUBLE, RowsFinalize<kOutlierAgg, kOutlierMethods, double>);
+    const vector<Overload> unsupervised {
+        {{LogicalType::VARCHAR, features}, FitUpdate<false>},
+        {{LogicalType::VARCHAR, features, LogicalType::VARCHAR}, FitUpdate<false>},
+        {{LogicalType::VARCHAR, features, LogicalType::VARCHAR, LogicalType::DOUBLE}, FitUpdate<false, true>},
+    };
+    make_rows(kClusterAgg, LogicalType::LIST(LogicalType::BIGINT),
+              RowsFinalize<kClusterAgg, kClusterMethods, int64_t>, unsupervised);
+    make_rows(kOutlierAgg, LogicalType::LIST(LogicalType::DOUBLE),
+              RowsFinalize<kOutlierAgg, kOutlierMethods, double>, unsupervised);
+    auto fit_transform = unsupervised;
+    fit_transform.push_back({{LogicalType::VARCHAR, LogicalType::DOUBLE, features}, FitUpdate<true>});
+    fit_transform.push_back(
+        {{LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR}, FitUpdate<true>});
+    fit_transform.push_back(
+        {{LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR, LogicalType::DOUBLE},
+         FitUpdate<true, true>});
+    make_rows("ml_fit_transform_agg", LogicalType::LIST(LogicalType::LIST(LogicalType::DOUBLE)),
+              FitTransformFinalize, fit_transform);
 }
 
 } // namespace duckdb

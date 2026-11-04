@@ -201,7 +201,8 @@ fn fit_model(
     Ok(model)
 }
 
-/// Run `method` of a fitted model on `x` (`labels` ignores `x`); returns the
+/// Run `method` of a fitted model on `x` (`labels` and `embedding`, which
+/// describe the training rows, ignore `x`); returns the
 /// row-major output and its column count.
 fn run_method(
     model: &dyn DynModel,
@@ -217,6 +218,7 @@ fn run_method(
             "inverse_transform" => model.inverse_transform(x),
             "score_samples" => model.score_samples(x),
             "labels" => model.labels(),
+            "embedding" => model.embedding(),
             _ => Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
                 "unknown method '{method}'"
             ))),
@@ -264,9 +266,10 @@ fn fit_apply_impl(
     params: &str,
     x: ArrayView2<f64>,
     y: Option<ArrayView1<f64>>,
+    w: Option<ArrayView1<f64>>,
     methods: &str,
 ) -> Result<(Vec<f64>, usize), String> {
-    let model = fit_model(kind, params, x, y, None)?;
+    let model = fit_model(kind, params, x, y, w)?;
     let caps = model.capabilities();
     let wanted: Vec<&str> = methods.split(',').map(str::trim).collect();
     let method = wanted
@@ -284,9 +287,10 @@ fn fit_apply_impl(
     Ok((v, cols))
 }
 
-/// Fit `kind` and run the first supported of the comma-separated `methods`
-/// (e.g. `labels,predict`) on the training rows; `out` receives
-/// `n_rows * out_cols` doubles, row-major. The model is not kept.
+/// Fit `kind` (with `y`, `w` when non-NULL) and run the first supported of
+/// the comma-separated `methods` (e.g. `labels,predict`) on the training
+/// rows; `out` receives `n_rows * out_cols` doubles, row-major. The model is
+/// not kept.
 ///
 /// # Safety
 /// As [`anofox_ml_fit`]; `methods` is a NUL-terminated string and
@@ -299,6 +303,7 @@ pub unsafe extern "C" fn anofox_ml_fit_apply(
     n_rows: usize,
     n_cols: usize,
     y: *const f64,
+    w: *const f64,
     methods: *const c_char,
     out: *mut AnofoxMlDoubles,
     out_cols: *mut usize,
@@ -313,7 +318,8 @@ pub unsafe extern "C" fn anofox_ml_fit_apply(
         let methods = str_arg(methods, "methods")?;
         let x = matrix(x, n_rows, n_cols)?;
         let y = (!y.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(y, n_rows)));
-        fit_apply_impl(kind, params, x, y, methods)
+        let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
+        fit_apply_impl(kind, params, x, y, w, methods)
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok((v, cols))) => {
@@ -532,6 +538,36 @@ pub unsafe extern "C" fn anofox_ml_model_kind(
             std::ptr::null_mut()
         }
         Err(e) => err(e),
+    }
+}
+
+/// The fitted state of a model BLOB as JSON (coefficients, importances,
+/// centers, ...; the layout is that of the estimator's fitted type).
+///
+/// # Safety
+/// `model` holds `model_len` bytes; `out` is writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_model_fitted(
+    model: *const u8,
+    model_len: usize,
+    out: *mut *mut c_char,
+) -> *mut c_char {
+    let run = || -> Result<String, String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        with_model(blob, |_, model| {
+            model.fitted_json().map_err(|e| e.to_string())
+        })
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(json)) => {
+            *out = err(json);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while reading the model"),
     }
 }
 
@@ -893,6 +929,7 @@ mod tests {
                 x.len() / n_cols,
                 n_cols,
                 std::ptr::null(),
+                std::ptr::null(),
                 methods.as_ptr(),
                 &mut out,
                 &mut cols,
@@ -956,5 +993,68 @@ mod tests {
         assert_eq!(lowest, 20);
         let e = fit_apply("StandardScaler", "", &x, 2, "labels,predict").unwrap_err();
         assert!(e.contains("supports none of"), "{e}");
+    }
+
+    #[test]
+    fn fit_apply_returns_the_training_embedding() {
+        let x = blobs();
+        let (emb, cols) = fit_apply(
+            "Isomap",
+            r#"{"n_neighbors": 5, "n_components": 2}"#,
+            &x[..40],
+            2,
+            "embedding,transform",
+        )
+        .unwrap();
+        assert_eq!((emb.len(), cols), (40, 2));
+        assert!(emb.iter().all(|v| v.is_finite()));
+        // A transformer without a stored embedding falls back to transform.
+        let (t, cols) = fit_apply("StandardScaler", "", &x, 2, "embedding,transform").unwrap();
+        assert_eq!((t.len(), cols), (42, 2));
+    }
+
+    #[test]
+    fn sample_weights_reach_the_estimator() {
+        // Weighted mean of [0, 10] with weights [3, 1] is 2.5.
+        let x = [0.0, 10.0];
+        let w = [3.0, 1.0];
+        let kind = CString::new("StandardScaler").unwrap();
+        let mut blob = AnofoxMlBytes {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            let e = anofox_ml_fit(
+                kind.as_ptr(),
+                std::ptr::null(),
+                x.as_ptr(),
+                2,
+                1,
+                std::ptr::null(),
+                w.as_ptr(),
+                &mut blob,
+            );
+            assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
+        }
+        let (t, _) = apply(&blob, "transform", &[2.5], 1).unwrap();
+        assert!(t[0].abs() < 1e-12, "{t:?}");
+        unsafe { anofox_ml_free_bytes(blob) };
+    }
+
+    #[test]
+    fn fitted_state_is_json() {
+        let x: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let y: Vec<f64> = x.iter().map(|v| 2.0 * v + 1.0).collect();
+        let blob = fit("DecisionTreeRegressor", "", &x, 1, Some(&y));
+        unsafe {
+            let mut s = std::ptr::null_mut();
+            let e = anofox_ml_model_fitted(blob.data, blob.len, &mut s);
+            assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
+            let v: serde_json::Value =
+                serde_json::from_str(CStr::from_ptr(s).to_str().unwrap()).unwrap();
+            assert!(v.is_object(), "{v}");
+            anofox_ml_free_string(s);
+            anofox_ml_free_bytes(blob);
+        }
     }
 }

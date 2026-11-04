@@ -1,0 +1,16 @@
+[package]
+name = "anofox_ml_ffi"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+description = "C ABI over anofox-ml-registry for the anofox_ml DuckDB extension"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# Until anofox-ml-registry is published on crates.io.
+anofox-ml-registry = { git = "https://github.com/sipemu/anofox-ml", branch = "feat/registry-crate" }
+ndarray = "0.16"
+rayon = "1.10"
+serde_json = "1"

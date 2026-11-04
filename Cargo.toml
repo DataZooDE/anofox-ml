@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/anofox-ml-ffi"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/DataZooDE/anofox-ml"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

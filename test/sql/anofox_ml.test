@@ -1,0 +1,62 @@
+# name: test/sql/anofox_ml.test
+# description: anofox_ml basics: estimators, fit, predict
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+query I
+SELECT count(*) > 100 FROM ml_estimators();
+----
+true
+
+query I
+SELECT count(*) FROM ml_estimators() WHERE kind = 'RandomForestClassifier';
+----
+1
+
+statement ok
+CREATE TABLE train AS
+SELECT g, i::DOUBLE AS a, (i % 7)::DOUBLE AS b, CASE WHEN i % 20 >= 10 THEN 1.0 ELSE 0.0 END AS y
+FROM range(400) t(i), (VALUES ('x'), ('y')) v(g);
+
+statement ok
+CREATE TABLE models AS
+SELECT g, ml_fit_agg('DecisionTreeClassifier', y, [a % 20, b]) AS model FROM train GROUP BY g;
+
+query I
+SELECT count(*) FROM models WHERE model IS NOT NULL;
+----
+2
+
+query I
+SELECT DISTINCT ml_model_kind(model) FROM models;
+----
+DecisionTreeClassifier
+
+# A fully grown tree reproduces its training labels.
+query I
+SELECT count(*) FROM train JOIN models USING (g) WHERE ml_predict(model, [a % 20, b]) <> y;
+----
+0
+
+statement ok
+CREATE TABLE rf AS
+SELECT ml_fit_agg('RandomForestClassifier', y, [a % 20, b], '{"n_estimators": 20, "max_depth": 4}') AS model FROM train;
+
+query I
+SELECT avg(CASE WHEN ml_predict(model, [a % 20, b]) = y THEN 1 ELSE 0 END) > 0.9 FROM train, rf;
+----
+true
+
+statement error
+SELECT ml_fit_agg('NoSuchModel', y, [a]) FROM train;
+----
+ml_fit_agg
+
+statement error
+SELECT ml_predict('not a model'::BLOB, [1.0]);
+----
+not an anofox_ml model BLOB

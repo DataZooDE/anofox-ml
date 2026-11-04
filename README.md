@@ -5,9 +5,9 @@ library (scikit-learn-compatible estimators, checked against scikit-learn)
 into SQL: fit a model per group with an aggregate, store it as a BLOB, and
 predict with it in any later query.
 
-> **Status: early development.** The first functions below work; the rest of
-> the design (predict_proba, transform, clustering, outlier scores, metrics,
-> fit-predict macros) is tracked in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work; the rest of the
+> design (clustering and outlier aggregates, metrics, fit-predict macros) is
+> tracked in sipemu/anofox-ml#91.
 
 Linear models and GLMs with statistical inference live in
 [anofox-statistics](https://github.com/DataZooDE/anofox-statistics); this
@@ -21,8 +21,14 @@ decomposition and preprocessing).
 |---|---|
 | `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
 | `ml_fit_agg(kind, y, [x1, x2, …] [, params])` | Aggregate: fit a model per group, returns a model `BLOB`. `params` is a JSON object merged into the defaults |
-| `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB |
-| `ml_model_kind(model)` | The estimator kind stored in a model BLOB |
+| `ml_fit_agg(kind, [x1, x2, …] [, params])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
+| `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`) |
+| `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
+| `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
+| `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`) |
+| `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
+| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version` and `crate_version` |
+| `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
 ```sql
@@ -40,13 +46,22 @@ GROUP BY store;
 SELECT t.*, ml_predict(m.model, [t.price, t.promo, t.dow]) AS forecast
 FROM test t JOIN models m USING (store);
 
+-- class probabilities, columns in the order of the stored classes
+SELECT ml_model_info(model).classes, ml_predict_proba(model, [x1, x2]) FROM churn_model, customers;
+
+-- unsupervised: standardise features
+CREATE TABLE scaler AS SELECT ml_fit_agg('StandardScaler', [price, promo]) AS model FROM train;
+SELECT ml_transform(model, [price, promo]) FROM train, scaler;
+
 -- what is available, and with which defaults
 SELECT kind, default_params FROM ml_estimators();
 ```
 
 Models are stored in anofox-ml's versioned binary format (MessagePack with
 field names, zstd-compressed), which stays readable as the library evolves.
-Rows with a NULL target or feature list are skipped when fitting. Each fit runs
+Rows with a NULL target or feature list are skipped when fitting. For models
+with `predict_proba`, the sorted distinct training targets are stored as
+`classes`; predicting with a feature list of the wrong length is an error. Each fit runs
 single-threaded inside a DuckDB worker; DuckDB parallelises across groups.
 
 ## Building

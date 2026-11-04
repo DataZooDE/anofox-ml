@@ -243,9 +243,11 @@ dependencies = [
 name = "anofox_ml_ffi"
 version = "0.1.0"
 dependencies = [
+ "anofox-ml-core",
  "anofox-ml-registry",
  "ndarray",
  "rayon",
+ "serde",
  "serde_json",
 ]
 

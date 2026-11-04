@@ -25,9 +25,27 @@ typedef struct {
 char *anofox_ml_fit(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
                     const double *y, const double *w, AnofoxMlBytes *out);
 
+typedef struct {
+    char *kind;
+    size_t n_features;
+    AnofoxMlDoubles classes; // data is NULL when the model has no classes
+    char *capabilities;      // supported methods separated by '\n'
+    char *params;            // JSON
+    uint32_t format_version;
+    char *crate_version;
+} AnofoxMlModelInfo;
+
 // Predict n_rows rows of x with a model BLOB; `out` receives n_rows doubles.
 char *anofox_ml_predict(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
                         AnofoxMlDoubles *out);
+
+// Apply `method` (predict, predict_proba, decision_function, transform,
+// inverse_transform, score_samples) to n_rows rows of x; `out` receives
+// n_rows * out_cols doubles, row-major.
+char *anofox_ml_apply(const uint8_t *model, size_t model_len, const char *method, const double *x, size_t n_rows,
+                      size_t n_cols, AnofoxMlDoubles *out, size_t *out_cols);
+
+char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'
 char *anofox_ml_default_params(const char *kind, char **out);        // JSON
@@ -38,6 +56,7 @@ const char *anofox_ml_ffi_version(void);
 void anofox_ml_free_string(char *s);
 void anofox_ml_free_bytes(AnofoxMlBytes b);
 void anofox_ml_free_doubles(AnofoxMlDoubles d);
+void anofox_ml_free_model_info(AnofoxMlModelInfo info);
 
 #ifdef __cplusplus
 }

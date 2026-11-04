@@ -60,3 +60,74 @@ statement error
 SELECT ml_predict('not a model'::BLOB, [1.0]);
 ----
 not an anofox_ml model BLOB
+
+# ---------------------------------------------------------------- model info
+
+query IIIII
+SELECT i.kind, i.n_features, i.classes, list_contains(i.capabilities, 'predict_proba'), i.format_version
+FROM (SELECT ml_model_info(model) AS i FROM rf);
+----
+RandomForestClassifier	2	[0.0, 1.0]	true	2
+
+query I
+SELECT ml_model_info(model).params LIKE '%"n_estimators":20%' FROM rf;
+----
+true
+
+query I
+SELECT ml_model_info(NULL::BLOB) IS NULL;
+----
+true
+
+# ------------------------------------------------------ predict_proba & co.
+
+# Probabilities sum to one and their argmax is the predicted class.
+query II
+SELECT bool_and(abs(list_sum(p) - 1) < 1e-9),
+       bool_and(ml_model_info(model).classes[list_position(p, list_max(p))] = ml_predict(model, [a % 20, b]))
+FROM (SELECT model, a, b, ml_predict_proba(model, [a % 20, b]) AS p FROM train, rf);
+----
+true	true
+
+statement error
+SELECT ml_predict_proba(ml_fit_agg('DecisionTreeRegressor', y, [a % 20, b]), [1.0, 2.0]) FROM train;
+----
+does not support predict_proba
+
+statement error
+SELECT ml_predict(model, [a % 20, b, 1.0]) FROM rf, train;
+----
+fitted on 2 features, got 3
+
+# ------------------------------------------------- unsupervised: no target
+
+statement ok
+CREATE TABLE scaler AS SELECT ml_fit_agg('StandardScaler', [a, b]) AS model FROM train;
+
+query II
+SELECT ml_model_info(model).classes IS NULL, len(ml_model_info(model).capabilities) > 0 FROM scaler;
+----
+true	true
+
+# Standardised columns have mean 0 and population variance 1.
+query II
+SELECT round(avg(t[1]), 9) = 0, round(var_pop(t[2]), 9) FROM (SELECT ml_transform(model, [a, b]) AS t FROM train, scaler);
+----
+true	1.0
+
+# inverse_transform undoes transform.
+query I
+SELECT bool_and(abs(ml_inverse_transform(model, ml_transform(model, [a, b]))[1] - a) < 1e-9) FROM train, scaler;
+----
+true
+
+statement error
+SELECT ml_predict(model, [a, b]) FROM train, scaler;
+----
+does not support predict
+
+query I
+SELECT count(DISTINCT ml_predict(m, [a % 20, b]))
+FROM train, (SELECT ml_fit_agg('KMeans', [a % 20, b], '{"n_clusters": 3, "seed": 0}') AS m FROM train);
+----
+3

@@ -4,10 +4,11 @@
 //! with [`anofox_ml_free_string`]). Output buffers are allocated here and
 //! released with the matching `anofox_ml_free_*` function.
 //!
-//! A model BLOB is `AMLX`, the kind as a `u16` little-endian length plus
-//! UTF-8 bytes, then the registry's model bytes (anofox-ml's binary
-//! persistence format). Feature matrices are row-major `n_rows × n_cols`
-//! doubles.
+//! A model BLOB is `AMLX`, a layout version byte, a `u32` little-endian
+//! length plus that many bytes of JSON metadata ([`Meta`]: kind, number of
+//! features, classes), then the registry's model bytes (anofox-ml's binary
+//! persistence format). Feature matrices and 2-D outputs are row-major
+//! `n_rows × n_cols` doubles.
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -16,11 +17,35 @@ use std::hash::{Hash, Hasher};
 
 use anofox_ml_registry::{DynModel, Out};
 use ndarray::{ArrayView1, ArrayView2};
+use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 4] = b"AMLX";
+const LAYOUT: u8 = 1;
 
-/// Cached decoded model: (BLOB hash, BLOB length, model).
-type CachedModel = Option<(u64, usize, Box<dyn DynModel>)>;
+/// Metadata stored in front of the model bytes, readable without decoding
+/// the model.
+#[derive(Serialize, Deserialize)]
+struct Meta {
+    kind: String,
+    n_features: usize,
+    /// Sorted distinct training targets of a model with `predict_proba`:
+    /// the column order of its probabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    classes: Option<Vec<f64>>,
+}
+
+/// Cached decoded model: (BLOB hash, BLOB length, metadata, model).
+type CachedModel = Option<(u64, usize, Meta, Box<dyn DynModel>)>;
+
+/// Prediction methods callable through [`anofox_ml_apply`].
+const METHODS: [&str; 6] = [
+    "predict",
+    "predict_proba",
+    "decision_function",
+    "transform",
+    "inverse_transform",
+    "score_samples",
+];
 
 #[repr(C)]
 pub struct AnofoxMlBytes {
@@ -32,6 +57,22 @@ pub struct AnofoxMlBytes {
 pub struct AnofoxMlDoubles {
     pub data: *mut f64,
     pub len: usize,
+}
+
+/// What [`anofox_ml_model_info`] reports about a model BLOB.
+#[repr(C)]
+pub struct AnofoxMlModelInfo {
+    pub kind: *mut c_char,
+    pub n_features: usize,
+    /// NULL when the model has no classes.
+    pub classes: AnofoxMlDoubles,
+    /// Methods the model supports, separated by `\n`.
+    pub capabilities: *mut c_char,
+    /// Estimator parameters as JSON.
+    pub params: *mut c_char,
+    pub format_version: u32,
+    /// anofox-ml version that wrote the model.
+    pub crate_version: *mut c_char,
 }
 
 thread_local! {
@@ -80,28 +121,56 @@ unsafe fn matrix<'a>(
     .map_err(|e| e.to_string())
 }
 
-fn encode(kind: &str, model: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(6 + kind.len() + model.len());
+fn encode(meta: &Meta, model: &[u8]) -> Vec<u8> {
+    let meta = serde_json::to_vec(meta).expect("metadata serializes");
+    let mut out = Vec::with_capacity(9 + meta.len() + model.len());
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&(kind.len() as u16).to_le_bytes());
-    out.extend_from_slice(kind.as_bytes());
+    out.push(LAYOUT);
+    out.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+    out.extend_from_slice(&meta);
     out.extend_from_slice(model);
     out
 }
 
-fn decode(blob: &[u8]) -> Result<(&str, &[u8]), String> {
+fn decode(blob: &[u8]) -> Result<(Meta, &[u8]), String> {
     let rest = blob
         .strip_prefix(MAGIC.as_slice())
         .ok_or("not an anofox_ml model BLOB")?;
-    if rest.len() < 2 {
-        return Err("truncated model BLOB".into());
+    match rest.first() {
+        Some(&LAYOUT) => {}
+        Some(v) => return Err(format!("unsupported model BLOB layout {v}")),
+        None => return Err("truncated model BLOB".into()),
     }
-    let n = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    let kind = rest
-        .get(2..2 + n)
-        .ok_or("truncated model BLOB")
-        .and_then(|k| std::str::from_utf8(k).map_err(|_| "invalid model kind"))?;
-    Ok((kind, &rest[2 + n..]))
+    let n = rest
+        .get(1..5)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")) as usize)
+        .ok_or("truncated model BLOB")?;
+    let meta = rest.get(5..5 + n).ok_or("truncated model BLOB")?;
+    let meta: Meta =
+        serde_json::from_slice(meta).map_err(|e| format!("invalid model BLOB metadata: {e}"))?;
+    Ok((meta, &rest[5 + n..]))
+}
+
+/// Run `f` on the decoded model of `blob`, decoding it only when it differs
+/// from the last model this thread used.
+fn with_model<T>(
+    blob: &[u8],
+    f: impl FnOnce(&Meta, &dyn DynModel) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut h = DefaultHasher::new();
+    blob.hash(&mut h);
+    let key = h.finish();
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let hit = matches!(&*cache, Some((k, n, _, _)) if *k == key && *n == blob.len());
+        if !hit {
+            let (meta, bytes) = decode(blob)?;
+            let model = anofox_ml_registry::load(&meta.kind, bytes).map_err(|e| e.to_string())?;
+            *cache = Some((key, blob.len(), meta, model));
+        }
+        let (_, _, meta, model) = cache.as_ref().expect("filled above");
+        f(meta, model.as_ref())
+    })
 }
 
 fn into_doubles(v: Vec<f64>) -> AnofoxMlDoubles {
@@ -130,7 +199,21 @@ fn fit_impl(
     POOL.with(|p| p.install(|| model.fit(x, y, w)))
         .map_err(|e| e.to_string())?;
     let bytes = model.to_bytes().map_err(|e| e.to_string())?;
-    Ok(encode(kind, &bytes))
+    let classes = match y {
+        Some(y) if model.capabilities().contains(&"predict_proba") => {
+            let mut c = y.to_vec();
+            c.sort_by(f64::total_cmp);
+            c.dedup();
+            Some(c)
+        }
+        _ => None,
+    };
+    let meta = Meta {
+        kind: kind.to_string(),
+        n_features: x.ncols(),
+        classes,
+    };
+    Ok(encode(&meta, &bytes))
 }
 
 /// Fit `kind` with JSON `params` on `x` (and `y`, `w` when non-NULL) and
@@ -178,28 +261,75 @@ pub unsafe extern "C" fn anofox_ml_fit(
     }
 }
 
-fn predict_impl(blob: &[u8], x: ArrayView2<f64>) -> Result<Vec<f64>, String> {
-    let mut h = DefaultHasher::new();
-    blob.hash(&mut h);
-    let key = h.finish();
-    CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let hit = matches!(&*cache, Some((k, n, _)) if *k == key && *n == blob.len());
-        if !hit {
-            let (kind, bytes) = decode(blob)?;
-            let model = anofox_ml_registry::load(kind, bytes).map_err(|e| e.to_string())?;
-            *cache = Some((key, blob.len(), model));
+/// Apply `method` to `x`; returns the row-major output and its column count.
+fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>, usize), String> {
+    if !METHODS.contains(&method) {
+        return Err(format!("unknown method '{method}' (known: {METHODS:?})"));
+    }
+    with_model(blob, |meta, model| {
+        if x.ncols() != meta.n_features {
+            return Err(format!(
+                "{} was fitted on {} features, got {}",
+                meta.kind,
+                meta.n_features,
+                x.ncols()
+            ));
         }
-        let model = &cache.as_ref().expect("filled above").2;
-        match POOL
-            .with(|p| p.install(|| model.predict(x)))
-            .map_err(|e| e.to_string())?
-        {
-            Out::A1(a) => Ok(a.to_vec()),
-            Out::A2(a) if a.ncols() == 1 => Ok(a.column(0).to_vec()),
-            Out::A2(a) => Err(format!("predict returned {} columns", a.ncols())),
+        let out = POOL.with(|p| {
+            p.install(|| match method {
+                "predict" => model.predict(x),
+                "predict_proba" => model.predict_proba(x),
+                "decision_function" => model.decision_function(x),
+                "transform" => model.transform(x),
+                "inverse_transform" => model.inverse_transform(x),
+                _ => model.score_samples(x),
+            })
+        });
+        match out.map_err(|e| e.to_string())? {
+            Out::A1(a) => Ok((a.to_vec(), 1)),
+            Out::A2(a) => {
+                let cols = a.ncols();
+                Ok((a.as_standard_layout().iter().copied().collect(), cols))
+            }
         }
     })
+}
+
+/// Apply `method` (`predict`, `predict_proba`, `decision_function`,
+/// `transform`, `inverse_transform` or `score_samples`) of a model BLOB to
+/// `n_rows` rows of `x`. `out` receives `n_rows * out_cols` doubles, row-major.
+///
+/// # Safety
+/// `model` holds `model_len` bytes, `method` is a NUL-terminated string,
+/// `x` holds `n_rows * n_cols` doubles, `out` / `out_cols` are writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_apply(
+    model: *const u8,
+    model_len: usize,
+    method: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    out: *mut AnofoxMlDoubles,
+    out_cols: *mut usize,
+) -> *mut c_char {
+    let run = || -> Result<(Vec<f64>, usize), String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let method = str_arg(method, "method")?;
+        let blob = std::slice::from_raw_parts(model, model_len);
+        apply_impl(blob, method, matrix(x, n_rows, n_cols)?)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok((v, cols))) => {
+            *out = into_doubles(v);
+            *out_cols = cols;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while predicting"),
+    }
 }
 
 /// Predict with a model BLOB on `n_rows` rows of `x`; `out` receives
@@ -222,7 +352,10 @@ pub unsafe extern "C" fn anofox_ml_predict(
             return Err("model is NULL".into());
         }
         let blob = std::slice::from_raw_parts(model, model_len);
-        predict_impl(blob, matrix(x, n_rows, n_cols)?)
+        match apply_impl(blob, "predict", matrix(x, n_rows, n_cols)?)? {
+            (v, 1) => Ok(v),
+            (_, cols) => Err(format!("predict returned {cols} columns")),
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(v)) => {
@@ -300,12 +433,76 @@ pub unsafe extern "C" fn anofox_ml_model_kind(
         return err("model is NULL");
     }
     match decode(std::slice::from_raw_parts(model, model_len)) {
-        Ok((kind, _)) => {
-            *out = err(kind);
+        Ok((meta, _)) => {
+            *out = err(meta.kind);
             std::ptr::null_mut()
         }
         Err(e) => err(e),
     }
+}
+
+fn cstring(s: impl Into<Vec<u8>>) -> *mut c_char {
+    CString::new(s).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
+/// Describe a model BLOB: kind, feature count, classes, supported methods,
+/// parameters and the persistence header.
+///
+/// # Safety
+/// `model` holds `model_len` bytes; `out` is writable. Release it with
+/// [`anofox_ml_free_model_info`].
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_model_info(
+    model: *const u8,
+    model_len: usize,
+    out: *mut AnofoxMlModelInfo,
+) -> *mut c_char {
+    let run = || -> Result<AnofoxMlModelInfo, String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        let (_, bytes) = decode(blob)?;
+        let header =
+            anofox_ml_core::persistence::binary_header(bytes).map_err(|e| e.to_string())?;
+        with_model(blob, |meta, model| {
+            let params = model.params().map_err(|e| e.to_string())?;
+            Ok(AnofoxMlModelInfo {
+                kind: cstring(meta.kind.as_str()),
+                n_features: meta.n_features,
+                classes: meta.classes.clone().map_or(
+                    AnofoxMlDoubles {
+                        data: std::ptr::null_mut(),
+                        len: 0,
+                    },
+                    into_doubles,
+                ),
+                capabilities: cstring(model.capabilities().join("\n")),
+                params: cstring(params.to_string()),
+                format_version: header.as_ref().map_or(0, |h| h.format_version),
+                crate_version: cstring(header.map(|h| h.crate_version).unwrap_or_default()),
+            })
+        })
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(info)) => {
+            *out = info;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while reading the model"),
+    }
+}
+
+/// # Safety
+/// `info` was filled by [`anofox_ml_model_info`].
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_free_model_info(info: AnofoxMlModelInfo) {
+    anofox_ml_free_string(info.kind);
+    anofox_ml_free_doubles(info.classes);
+    anofox_ml_free_string(info.capabilities);
+    anofox_ml_free_string(info.params);
+    anofox_ml_free_string(info.crate_version);
 }
 
 /// Version of this library (NUL-terminated, static).
@@ -441,5 +638,139 @@ mod tests {
             assert!(v.as_array().unwrap().len() > 100);
             anofox_ml_free_string(s);
         }
+    }
+
+    fn fit(kind: &str, params: &str, x: &[f64], n_cols: usize, y: Option<&[f64]>) -> AnofoxMlBytes {
+        let kind = CString::new(kind).unwrap();
+        let params = CString::new(params).unwrap();
+        let mut blob = AnofoxMlBytes {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        unsafe {
+            let e = anofox_ml_fit(
+                kind.as_ptr(),
+                params.as_ptr(),
+                x.as_ptr(),
+                x.len() / n_cols,
+                n_cols,
+                y.map_or(std::ptr::null(), <[f64]>::as_ptr),
+                std::ptr::null(),
+                &mut blob,
+            );
+            assert!(e.is_null(), "{}", CStr::from_ptr(e).to_str().unwrap());
+        }
+        blob
+    }
+
+    fn apply(
+        blob: &AnofoxMlBytes,
+        method: &str,
+        x: &[f64],
+        n_cols: usize,
+    ) -> Result<(Vec<f64>, usize), String> {
+        let method = CString::new(method).unwrap();
+        let mut out = AnofoxMlDoubles {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        let mut cols = 0;
+        unsafe {
+            let e = anofox_ml_apply(
+                blob.data,
+                blob.len,
+                method.as_ptr(),
+                x.as_ptr(),
+                x.len() / n_cols,
+                n_cols,
+                &mut out,
+                &mut cols,
+            );
+            if !e.is_null() {
+                let msg = CStr::from_ptr(e).to_str().unwrap().to_string();
+                anofox_ml_free_string(e);
+                return Err(msg);
+            }
+            let v = std::slice::from_raw_parts(out.data, out.len).to_vec();
+            anofox_ml_free_doubles(out);
+            Ok((v, cols))
+        }
+    }
+
+    #[test]
+    fn predict_proba_columns_follow_the_stored_classes() {
+        // Three classes with non-contiguous labels.
+        let x: Vec<f64> = (0..30).map(|i| (i % 15) as f64).collect();
+        let y: Vec<f64> = (0..30).map(|i| [7.0, -1.0, 3.0][(i % 15) / 5]).collect();
+        let blob = fit(
+            "RandomForestClassifier",
+            r#"{"n_estimators": 10}"#,
+            &x,
+            1,
+            Some(&y),
+        );
+        let (proba, cols) = apply(&blob, "predict_proba", &x, 1).unwrap();
+        let (pred, _) = apply(&blob, "predict", &x, 1).unwrap();
+        assert_eq!(cols, 3);
+        unsafe {
+            let mut info = std::mem::zeroed::<AnofoxMlModelInfo>();
+            assert!(anofox_ml_model_info(blob.data, blob.len, &mut info).is_null());
+            let classes = std::slice::from_raw_parts(info.classes.data, info.classes.len);
+            assert_eq!(classes, [-1.0, 3.0, 7.0]);
+            for (row, p) in proba.chunks(cols).zip(&pred) {
+                let best = (0..cols)
+                    .max_by(|&a, &b| row[a].total_cmp(&row[b]))
+                    .unwrap();
+                assert_eq!(classes[best], *p);
+            }
+            assert_eq!(info.n_features, 1);
+            assert_eq!(info.format_version, 2);
+            assert_eq!(
+                CStr::from_ptr(info.kind).to_str().unwrap(),
+                "RandomForestClassifier"
+            );
+            let caps = CStr::from_ptr(info.capabilities).to_str().unwrap();
+            assert!(caps.split('\n').any(|c| c == "predict_proba"), "{caps}");
+            let params: serde_json::Value =
+                serde_json::from_str(CStr::from_ptr(info.params).to_str().unwrap()).unwrap();
+            assert_eq!(params["n_estimators"], 10);
+            anofox_ml_free_model_info(info);
+            anofox_ml_free_bytes(blob);
+        }
+    }
+
+    #[test]
+    fn transform_returns_a_row_major_matrix() {
+        let x = [1.0, 10.0, 2.0, 20.0, 3.0, 30.0];
+        let blob = fit("StandardScaler", "", &x, 2, None);
+        let (t, cols) = apply(&blob, "transform", &x, 2).unwrap();
+        assert_eq!(cols, 2);
+        // Columns have mean 2 / 20 and population std sqrt(2/3) / 10 sqrt(2/3).
+        let s = 1.5_f64.sqrt();
+        let expected = [-s, -s, 0.0, 0.0, s, s];
+        for (a, b) in t.iter().zip(expected) {
+            assert!((a - b).abs() < 1e-12, "{t:?}");
+        }
+        unsafe {
+            let mut info = std::mem::zeroed::<AnofoxMlModelInfo>();
+            assert!(anofox_ml_model_info(blob.data, blob.len, &mut info).is_null());
+            assert!(info.classes.data.is_null());
+            anofox_ml_free_model_info(info);
+            anofox_ml_free_bytes(blob);
+        }
+    }
+
+    #[test]
+    fn wrong_feature_count_and_unknown_method_are_errors() {
+        let x = [0.0, 1.0, 2.0, 3.0];
+        let y = [0.0, 0.0, 1.0, 1.0];
+        let blob = fit("DecisionTreeRegressor", "", &x, 1, Some(&y));
+        let e = apply(&blob, "predict", &x, 2).unwrap_err();
+        assert!(e.contains("fitted on 1 features, got 2"), "{e}");
+        let e = apply(&blob, "explode", &x, 1).unwrap_err();
+        assert!(e.contains("unknown method"), "{e}");
+        let e = apply(&blob, "predict_proba", &x, 1).unwrap_err();
+        assert!(e.contains("does not support predict_proba"), "{e}");
+        unsafe { anofox_ml_free_bytes(blob) };
     }
 }

@@ -10,12 +10,11 @@ description = "C ABI over anofox-ml-registry for the anofox_ml DuckDB extension"
 crate-type = ["staticlib"]
 
 [dependencies]
-# Until anofox-ml-registry is published on crates.io (registry merged in sipemu/anofox-ml#90).
-anofox-ml-core = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
-anofox-ml-registry = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
-anofox-ml-metrics = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
-anofox-ml-conformal = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
-anofox-ml-text = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
+anofox-ml-core = "0.2"
+anofox-ml-registry = "0.2"
+anofox-ml-metrics = "0.2"
+anofox-ml-conformal = "0.2"
+anofox-ml-text = "0.2"
 ndarray = "0.16"
 rand = "0.8"
 rayon = "1.10"

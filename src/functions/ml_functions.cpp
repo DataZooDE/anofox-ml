@@ -135,6 +135,8 @@ struct FitState {
     std::vector<double> *w;
     std::vector<std::string> *labels; // string targets (has_labels)
     bool has_labels;
+    std::vector<std::string> *sx; // VARCHAR features of an encoder (string_x)
+    bool string_x;
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -154,6 +156,8 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.w = new std::vector<double>();
     s.labels = new std::vector<std::string>();
     s.has_labels = false;
+    s.sx = new std::vector<std::string>();
+    s.string_x = false;
     s.used = new std::vector<uint8_t>();
 }
 
@@ -167,6 +171,7 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.y;
         delete s.w;
         delete s.labels;
+        delete s.sx;
         delete s.used;
     }
 }
@@ -285,6 +290,59 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
     }
 }
 
+// ml_fit_agg(kind VARCHAR, x VARCHAR[] [, params VARCHAR]) for the categorical
+// encoders; rows with a NULL list or a NULL element are skipped.
+void EncodeUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
+    UnifiedVectorFormat kind_data, x_data, params_data, sdata;
+    inputs[0].ToUnifiedFormat(count, kind_data);
+    inputs[1].ToUnifiedFormat(count, x_data);
+    const bool has_params = input_count > 2;
+    if (has_params) {
+        inputs[2].ToUnifiedFormat(count, params_data);
+    }
+    state_vector.ToUnifiedFormat(count, sdata);
+    auto kinds = UnifiedVectorFormat::GetData<string_t>(kind_data);
+    auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
+    auto &child = ListVector::GetEntry(inputs[1]);
+    UnifiedVectorFormat child_data;
+    child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
+    auto values = UnifiedVectorFormat::GetData<string_t>(child_data);
+    auto states = reinterpret_cast<FitState **>(sdata.data);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[sdata.sel->get_index(i)];
+        auto ki = kind_data.sel->get_index(i);
+        auto xi = x_data.sel->get_index(i);
+        if (!kind_data.validity.RowIsValid(ki) || !x_data.validity.RowIsValid(xi) ||
+            HasNullElement(child_data, lists[xi])) {
+            s.used->push_back(0);
+            continue;
+        }
+        const auto &entry = lists[xi];
+        if (!s.initialized) {
+            s.initialized = true;
+            s.string_x = true;
+            *s.kind = kinds[ki].GetString();
+            if (has_params) {
+                auto pi = params_data.sel->get_index(i);
+                if (params_data.validity.RowIsValid(pi)) {
+                    *s.params = UnifiedVectorFormat::GetData<string_t>(params_data)[pi].GetString();
+                }
+            }
+            s.n_cols = entry.length;
+        }
+        if (entry.length != s.n_cols) {
+            throw InvalidInputException("ml_fit_agg: every feature list must have %llu values, got %llu",
+                                        (unsigned long long)s.n_cols, (unsigned long long)entry.length);
+        }
+        for (idx_t j = 0; j < entry.length; j++) {
+            s.sx->push_back(values[child_data.sel->get_index(entry.offset + j)].GetString());
+        }
+        s.n_rows++;
+        s.used->push_back(1);
+        CheckFitSize(aggr, s.sx->size());
+    }
+}
+
 void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &aggr, idx_t count) {
     auto sources = FlatVector::GetData<FitState *>(source_vector);
     auto targets = FlatVector::GetData<FitState *>(target_vector);
@@ -300,6 +358,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
             tgt.has_y = src.has_y;
             tgt.has_w = src.has_w;
             tgt.has_labels = src.has_labels;
+            tgt.string_x = src.string_x;
             *tgt.kind = *src.kind;
             *tgt.params = *src.params;
             tgt.n_cols = src.n_cols;
@@ -310,8 +369,9 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
         tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
         tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
+        tgt.sx->insert(tgt.sx->end(), src.sx->begin(), src.sx->end());
         tgt.n_rows += src.n_rows;
-        CheckFitSize(aggr, tgt.x->size());
+        CheckFitSize(aggr, tgt.x->size() + tgt.sx->size());
     }
 }
 
@@ -327,7 +387,15 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
         CaptureUse("ml_fit_agg");
         AnofoxMlBytes blob {nullptr, 0};
         const double *w = s.has_w ? s.w->data() : nullptr;
-        if (s.has_labels) {
+        if (s.string_x) {
+            std::vector<const char *> x;
+            x.reserve(s.sx->size());
+            for (const auto &v : *s.sx) {
+                x.push_back(v.c_str());
+            }
+            Check(anofox_ml_fit_encoder(s.kind->c_str(), s.params->c_str(), x.data(), s.n_rows, s.n_cols, &blob),
+                  "ml_fit_agg");
+        } else if (s.has_labels) {
             std::vector<const char *> labels;
             labels.reserve(s.labels->size());
             for (const auto &l : *s.labels) {
@@ -841,6 +909,85 @@ void ImportanceFinalize(Vector &state_vector, AggregateInputData &, Vector &resu
 }
 
 //===--------------------------------------------------------------------===//
+// ml_transform(encoder BLOB, x VARCHAR[]) -> DOUBLE[] (categorical encoders)
+//===--------------------------------------------------------------------===//
+void MlEncodeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    idx_t count = args.size();
+    UnifiedVectorFormat model_data, x_data;
+    args.data[0].ToUnifiedFormat(count, model_data);
+    args.data[1].ToUnifiedFormat(count, x_data);
+    auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
+    auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
+    auto &child = ListVector::GetEntry(args.data[1]);
+    UnifiedVectorFormat child_data;
+    child.ToUnifiedFormat(ListVector::GetListSize(args.data[1]), child_data);
+    auto values = UnifiedVectorFormat::GetData<string_t>(child_data);
+    result.SetVectorType(VectorType::FLAT_VECTOR);
+    CaptureUse("ml_transform");
+
+    std::vector<std::pair<idx_t, std::vector<double>>> rows_out;
+    std::vector<idx_t> rows;
+    std::vector<std::string> x;
+    string_t current;
+    idx_t n_cols = 0;
+    auto flush = [&]() {
+        if (rows.empty()) {
+            return;
+        }
+        std::vector<const char *> ptrs;
+        for (const auto &v : x) {
+            ptrs.push_back(v.c_str());
+        }
+        AnofoxMlDoubles out {nullptr, 0};
+        size_t out_cols = 0;
+        Check(anofox_ml_encode(reinterpret_cast<const uint8_t *>(current.GetData()), current.GetSize(), ptrs.data(),
+                               rows.size(), n_cols, &out, &out_cols),
+              "ml_transform");
+        for (idx_t r = 0; r < rows.size(); r++) {
+            rows_out.emplace_back(rows[r], std::vector<double>(out.data + r * out_cols, out.data + (r + 1) * out_cols));
+        }
+        anofox_ml_free_doubles(out);
+        rows.clear();
+        x.clear();
+    };
+    for (idx_t i = 0; i < count; i++) {
+        auto mi = model_data.sel->get_index(i);
+        auto xi = x_data.sel->get_index(i);
+        if (!model_data.validity.RowIsValid(mi) || !x_data.validity.RowIsValid(xi) ||
+            HasNullElement(child_data, lists[xi])) {
+            FlatVector::SetNull(result, i, true);
+            continue;
+        }
+        const auto &model = models[mi];
+        const auto &entry = lists[xi];
+        bool same = !rows.empty() && model.GetSize() == current.GetSize() &&
+                    memcmp(model.GetData(), current.GetData(), model.GetSize()) == 0;
+        if (!same || entry.length != n_cols) {
+            flush();
+            current = model;
+            n_cols = entry.length;
+        }
+        for (idx_t j = 0; j < entry.length; j++) {
+            x.push_back(values[child_data.sel->get_index(entry.offset + j)].GetString());
+        }
+        rows.push_back(i);
+    }
+    flush();
+    auto entries = FlatVector::GetData<list_entry_t>(result);
+    idx_t offset = ListVector::GetListSize(result);
+    for (auto &r : rows_out) {
+        entries[r.first] = list_entry_t(offset, r.second.size());
+        for (double d : r.second) {
+            ListVector::PushBack(result, Value::DOUBLE(d));
+        }
+        offset += r.second.size();
+    }
+    if (args.AllConstant()) {
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_predict(model BLOB, x DOUBLE[]) -> DOUBLE
 //===--------------------------------------------------------------------===//
 void MlPredictFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -1021,13 +1168,20 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(importance_set);
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
-        {"ml_transform", "transform"},         {"ml_inverse_transform", "inverse_transform"},
+        {"ml_inverse_transform", "inverse_transform"},
         {"ml_score_samples", "score_samples"},
     };
     for (const auto &f : list_functions) {
         loader.RegisterFunction(ScalarFunction(f.first, model_and_x, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
                                                MakeListFunction(f.first, f.second)));
     }
+    ScalarFunctionSet transform_set("ml_transform");
+    transform_set.AddFunction(ScalarFunction(model_and_x, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
+                                             MakeListFunction("ml_transform", "transform")));
+    transform_set.AddFunction(ScalarFunction({LogicalType(LogicalTypeId::BLOB),
+                                              LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR))},
+                                             LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)), MlEncodeFunction));
+    loader.RegisterFunction(transform_set);
     loader.RegisterFunction(TableFunction("ml_estimators", {}, EstimatorsFunction, EstimatorsBind, EstimatorsInit));
 
     AggregateFunctionSet fit_set("ml_fit_agg");
@@ -1053,6 +1207,10 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     fit_set.AddFunction(make_fit({V, V, features}, FitUpdate<true, false, true>));
     fit_set.AddFunction(make_fit({V, V, features, V}, FitUpdate<true, false, true>));
     fit_set.AddFunction(make_fit({V, V, features, V, LogicalType(LogicalTypeId::DOUBLE)}, FitUpdate<true, true, true>));
+    // Categorical encoders on VARCHAR features.
+    const auto string_features = LogicalType::LIST(V);
+    fit_set.AddFunction(make_fit({V, string_features}, EncodeUpdate));
+    fit_set.AddFunction(make_fit({V, string_features, V}, EncodeUpdate));
     loader.RegisterFunction(fit_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;

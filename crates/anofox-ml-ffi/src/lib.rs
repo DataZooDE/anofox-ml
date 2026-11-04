@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 
 mod conformal;
 mod cv;
+mod encode;
 mod inspect;
 mod metrics;
 mod text;
@@ -45,6 +46,9 @@ struct Meta {
     /// Calibration scores of a conformalized model (see [`conformal`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     conformity: Option<conformal::Conformity>,
+    /// Categories of a `VARCHAR` encoder (no registry model behind it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encoder: Option<encode::EncoderFit>,
 }
 
 /// Cached decoded model: (BLOB hash, BLOB length, metadata, model).
@@ -229,6 +233,12 @@ fn with_model<T>(
         let hit = matches!(&*cache, Some((k, n, _, _)) if *k == key && *n == blob.len());
         if !hit {
             let (meta, bytes) = decode(blob)?;
+            if meta.encoder.is_some() {
+                return Err(format!(
+                    "{} encodes VARCHAR features: use ml_transform(model, [col, ...]) with VARCHAR values",
+                    meta.kind
+                ));
+            }
             let model = anofox_ml_registry::load(&meta.kind, bytes).map_err(|e| e.to_string())?;
             *cache = Some((key, blob.len(), meta, model));
         }
@@ -322,6 +332,7 @@ fn fit_impl(
         classes,
         labels,
         conformity: None,
+        encoder: None,
     };
     Ok(encode(&meta, &bytes))
 }
@@ -743,6 +754,9 @@ pub unsafe extern "C" fn anofox_ml_model_fitted(
             return Err("model is NULL".into());
         }
         let blob = std::slice::from_raw_parts(model, model_len);
+        if let Ok(e) = encode::encoder_of(blob) {
+            return Ok(serde_json::json!({ "categories": e.categories }).to_string());
+        }
         with_model(blob, |_, model| {
             model.fitted_json().map_err(|e| e.to_string())
         })
@@ -778,7 +792,22 @@ pub unsafe extern "C" fn anofox_ml_model_info(
             return Err("model is NULL".into());
         }
         let blob = std::slice::from_raw_parts(model, model_len);
-        let (_, bytes) = decode(blob)?;
+        let (meta, bytes) = decode(blob)?;
+        if let Some(e) = &meta.encoder {
+            return Ok(AnofoxMlModelInfo {
+                kind: cstring(meta.kind.as_str()),
+                n_features: meta.n_features,
+                classes: AnofoxMlDoubles {
+                    data: std::ptr::null_mut(),
+                    len: 0,
+                },
+                capabilities: cstring("transform"),
+                params: cstring(e.params_json().to_string()),
+                format_version: 0,
+                crate_version: cstring(env!("CARGO_PKG_VERSION")),
+                labels: into_strings::<String>(&[]),
+            });
+        }
         let header =
             anofox_ml_core::persistence::binary_header(bytes).map_err(|e| e.to_string())?;
         with_model(blob, |meta, model| {
@@ -1304,6 +1333,7 @@ mod tests {
             classes: None,
             labels: None,
             conformity: None,
+            encoder: None,
         };
         assert_eq!(label_of(&meta, 1.0).unwrap(), "1");
         assert_eq!(label_of(&meta, -2.5).unwrap(), "-2.5");

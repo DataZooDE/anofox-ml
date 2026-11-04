@@ -15,7 +15,7 @@
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 104 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. Metrics, fit-predict table macros, tuning and the community-extension release are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested. Metrics, fit-predict table macros and tuning are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
 
 ## ✨ Key Features
@@ -67,9 +67,7 @@ A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-
 
 ## Installation
 
-### Community Extension
-
-Not published yet. The community-extension release is tracked in [#4](https://github.com/DataZooDE/anofox-ml/issues/4).
+The extension is not published as a DuckDB community extension yet; that is on hold until the API has matured. Build it from source for now.
 
 ### From Source
 
@@ -178,7 +176,6 @@ SELECT kind, default_params FROM ml_estimators();
 | Metric aggregates (`ml_r2`, `ml_rmse`, `ml_roc_auc`, `ml_log_loss`, …) | [#1](https://github.com/DataZooDE/anofox-ml/issues/1) |
 | Fit-predict table macros (`ml_fit_predict_by`, `ml_cluster_by`, …) | [#2](https://github.com/DataZooDE/anofox-ml/issues/2) |
 | Sample weights and a memory guard for large groups | [#3](https://github.com/DataZooDE/anofox-ml/issues/3) |
-| Community extension release | [#4](https://github.com/DataZooDE/anofox-ml/issues/4) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Conformal prediction intervals | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Parallelism within a single fit | [#7](https://github.com/DataZooDE/anofox-ml/issues/7) |

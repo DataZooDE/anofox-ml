@@ -656,11 +656,14 @@ void MlPredictSetFunction(DataChunk &args, ExpressionState &state, Vector &resul
 }
 
 //===--------------------------------------------------------------------===//
-// ml_conformalize_agg(model BLOB, y DOUBLE | VARCHAR, x DOUBLE[]) -> BLOB
-// Calibrates a fitted model on held-out rows (split conformal).
+// Aggregates over (model BLOB, y DOUBLE | VARCHAR, x DOUBLE[] [, options]):
+// ml_conformalize_agg(model, y, x) -> BLOB calibrates a fitted model on
+// held-out rows (split conformal); ml_permutation_importance_agg(model, y, x
+// [, options]) -> STRUCT(feature, importance_mean, importance_std)[].
 //===--------------------------------------------------------------------===//
 struct ConformalState {
     std::string *model;
+    std::string *options;
     std::vector<double> *x;
     std::vector<double> *y;
     std::vector<std::string> *labels;
@@ -671,6 +674,7 @@ struct ConformalState {
 void ConformalInitialize(const AggregateFunction &, data_ptr_t state_p) {
     auto &s = *reinterpret_cast<ConformalState *>(state_p);
     s.model = new std::string();
+    s.options = new std::string();
     s.x = new std::vector<double>();
     s.y = new std::vector<double>();
     s.labels = new std::vector<std::string>();
@@ -682,6 +686,7 @@ void ConformalDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
     auto states = FlatVector::GetData<ConformalState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         delete states[i]->model;
+        delete states[i]->options;
         delete states[i]->x;
         delete states[i]->y;
         delete states[i]->labels;
@@ -689,8 +694,11 @@ void ConformalDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
 }
 
 template <bool LABELS>
-void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &state_vector, idx_t count) {
-    UnifiedVectorFormat model_data, y_data, x_data, sdata;
+void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
+    UnifiedVectorFormat model_data, y_data, x_data, options_data, sdata;
+    if (input_count > 3) {
+        inputs[3].ToUnifiedFormat(count, options_data);
+    }
     inputs[0].ToUnifiedFormat(count, model_data);
     inputs[1].ToUnifiedFormat(count, y_data);
     inputs[2].ToUnifiedFormat(count, x_data);
@@ -715,6 +723,12 @@ void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &state
         if (s.n_rows == 0) {
             *s.model = models[mi].GetString();
             s.n_cols = entry.length;
+            if (input_count > 3) {
+                auto oi = options_data.sel->get_index(i);
+                if (options_data.validity.RowIsValid(oi)) {
+                    *s.options = UnifiedVectorFormat::GetData<string_t>(options_data)[oi].GetString();
+                }
+            }
         } else if (models[mi].GetSize() != s.model->size() ||
                    memcmp(models[mi].GetData(), s.model->data(), s.model->size()) != 0) {
             throw InvalidInputException("ml_conformalize_agg: every row of a group must carry the same model");
@@ -744,6 +758,7 @@ void ConformalCombine(Vector &source_vector, Vector &target_vector, AggregateInp
         }
         if (tgt.n_rows == 0) {
             *tgt.model = *src.model;
+            *tgt.options = *src.options;
             tgt.n_cols = src.n_cols;
         } else if (*tgt.model != *src.model) {
             throw InvalidInputException("ml_conformalize_agg: every row of a group must carry the same model");
@@ -784,6 +799,44 @@ void ConformalFinalize(Vector &state_vector, AggregateInputData &, Vector &resul
         FlatVector::GetData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
+    }
+}
+
+void ImportanceFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<ConformalState *>(state_vector);
+    auto entries = FlatVector::GetData<list_entry_t>(result);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_permutation_importance_agg");
+        std::vector<const char *> labels;
+        for (const auto &l : *s.labels) {
+            labels.push_back(l.c_str());
+        }
+        AnofoxMlDoubles out {nullptr, 0};
+        Check(anofox_ml_permutation_importance(reinterpret_cast<const uint8_t *>(s.model->data()), s.model->size(),
+                                               s.x->data(), s.n_rows, s.n_cols,
+                                               s.labels->empty() ? s.y->data() : nullptr,
+                                               s.labels->empty() ? nullptr : labels.data(), s.options->c_str(), &out),
+              "ml_permutation_importance_agg");
+        idx_t list_offset = ListVector::GetListSize(result);
+        ListVector::Reserve(result, list_offset + s.n_cols);
+        auto &fields = StructVector::GetEntries(ListVector::GetEntry(result));
+        auto feature = FlatVector::GetData<int32_t>(*fields[0]);
+        auto mean = FlatVector::GetData<double>(*fields[1]);
+        auto stddev = FlatVector::GetData<double>(*fields[2]);
+        for (idx_t j = 0; j < s.n_cols; j++) {
+            feature[list_offset + j] = static_cast<int32_t>(j + 1); // 1-based, as x[feature]
+            mean[list_offset + j] = out.data[2 * j];
+            stddev[list_offset + j] = out.data[2 * j + 1];
+        }
+        anofox_ml_free_doubles(out);
+        ListVector::SetListSize(result, list_offset + s.n_cols);
+        entries[row] = list_entry_t(list_offset, s.n_cols);
     }
 }
 
@@ -933,7 +986,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     AggregateFunctionSet conformal_set("ml_conformalize_agg");
     for (bool labels : {false, true}) {
         AggregateFunction f("ml_conformalize_agg",
-                            {LogicalType::BLOB, labels ? LogicalType::VARCHAR : LogicalType::DOUBLE,
+                            {LogicalType::BLOB, LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
                              LogicalType::LIST(LogicalType::DOUBLE)},
                             LogicalType::BLOB, AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
                             labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine,
@@ -942,6 +995,30 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         conformal_set.AddFunction(f);
     }
     loader.RegisterFunction(conformal_set);
+
+    child_list_t<LogicalType> importance_fields;
+    importance_fields.emplace_back("feature", LogicalType(LogicalTypeId::INTEGER));
+    importance_fields.emplace_back("importance_mean", LogicalType(LogicalTypeId::DOUBLE));
+    importance_fields.emplace_back("importance_std", LogicalType(LogicalTypeId::DOUBLE));
+    const auto importance_type = LogicalType::LIST(LogicalType::STRUCT(std::move(importance_fields)));
+    AggregateFunctionSet importance_set("ml_permutation_importance_agg");
+    for (bool labels : {false, true}) {
+        for (bool options : {false, true}) {
+            vector<LogicalType> args {LogicalType::BLOB,
+                                      LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
+                                      LogicalType::LIST(LogicalType::DOUBLE)};
+            if (options) {
+                args.push_back(LogicalType::VARCHAR);
+            }
+            AggregateFunction f("ml_permutation_importance_agg", args, importance_type,
+                                AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
+                                labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine,
+                                ImportanceFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
+                                ConformalDestroy);
+            importance_set.AddFunction(f);
+        }
+    }
+    loader.RegisterFunction(importance_set);
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
         {"ml_transform", "transform"},         {"ml_inverse_transform", "inverse_transform"},

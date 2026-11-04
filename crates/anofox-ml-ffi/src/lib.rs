@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 
 mod conformal;
 mod cv;
+mod inspect;
 mod metrics;
 
 use anofox_ml_registry::{DynModel, Out};

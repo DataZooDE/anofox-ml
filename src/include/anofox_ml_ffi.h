@@ -103,6 +103,13 @@ char *anofox_ml_predict_interval(const uint8_t *model, size_t model_len, const d
 char *anofox_ml_predict_set(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
                             double alpha, AnofoxMlStrings *labels, AnofoxMlDoubles *lengths);
 
+// Permutation importance of a model on n_rows rows (y as doubles, or y_labels
+// for a model fitted on string labels; the other NULL). `out` receives
+// n_cols x 2 doubles: mean and std of the metric drop per feature.
+char *anofox_ml_permutation_importance(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,
+                                       size_t n_cols, const double *y, const char *const *y_labels,
+                                       const char *options, AnofoxMlDoubles *out);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

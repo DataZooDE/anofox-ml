@@ -121,6 +121,13 @@ char *anofox_ml_permutation_importance(const uint8_t *model, size_t model_len, c
 char *anofox_ml_hashing_vectorize(const char *text, size_t n_features, const char *options, bool dense,
                                   AnofoxMlDoubles *out);
 
+// Categorical encoders (OneHotEncoder, OrdinalEncoder) on VARCHAR features:
+// fit on n_rows x n_cols strings (row-major), encode into n_rows x out_cols.
+char *anofox_ml_fit_encoder(const char *kind, const char *params, const char *const *x, size_t n_rows,
+                            size_t n_cols, AnofoxMlBytes *out);
+char *anofox_ml_encode(const uint8_t *model, size_t model_len, const char *const *x, size_t n_rows, size_t n_cols,
+                       AnofoxMlDoubles *out, size_t *out_cols);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

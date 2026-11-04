@@ -1,0 +1,81 @@
+# name: test/sql/ml_encode.test
+# description: categorical encoders on VARCHAR features
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+statement ok
+CREATE TABLE s AS SELECT i AS id, ['Berlin', 'Paris', 'Rome'][i % 3 + 1] AS city, ['web', 'shop'][i % 2 + 1] AS channel,
+    10.0 * (i % 3) + 5.0 * (i % 2) + (i % 7) / 7.0 AS sales
+FROM range(60) t(i);
+
+statement ok
+CREATE TABLE e AS SELECT ml_fit_agg('OneHotEncoder', [city, channel]) AS enc FROM s;
+
+# categories sorted per column, one column per category (scikit-learn OneHotEncoder)
+query I
+SELECT ml_model_fitted(enc) FROM e;
+----
+{"categories":[["Berlin","Paris","Rome"],["shop","web"]]}
+
+query I
+SELECT ml_transform(enc, ['Paris', 'web']) FROM e;
+----
+[0.0, 1.0, 0.0, 0.0, 1.0]
+
+query III
+SELECT ml_model_info(enc).kind, ml_model_info(enc).n_features, ml_model_info(enc).capabilities FROM e;
+----
+OneHotEncoder	2	[transform]
+
+# drop and unknown categories
+query II
+SELECT ml_transform(enc, ['Madrid', 'web']), ml_transform(enc, ['Rome', 'shop'])
+FROM (SELECT ml_fit_agg('OneHotEncoder', [city, channel], '{"handle_unknown": "ignore", "drop": "first"}') AS enc FROM s);
+----
+[0.0, 0.0, 1.0]	[0.0, 1.0, 0.0]
+
+statement error
+SELECT ml_transform(enc, ['Madrid', 'web']) FROM e;
+----
+unknown category 'Madrid'
+
+# ordinal codes; unknowns map to unknown_value
+query II
+SELECT ml_transform(enc, ['Rome', 'web']), ml_transform(enc, ['Madrid', 'web'])
+FROM (SELECT ml_fit_agg('OrdinalEncoder', [city, channel], '{"handle_unknown": "ignore", "unknown_value": -9}') AS enc FROM s);
+----
+[2.0, 1.0]	[-9.0, 1.0]
+
+# NULL elements: skipped when fitting, NULL when encoding
+query II
+SELECT ml_model_fitted(enc), ml_transform(enc, ['a', NULL]) IS NULL
+FROM (SELECT ml_fit_agg('OrdinalEncoder', [c, d]) AS enc FROM (VALUES ('a', 'x'), ('b', NULL), ('c', 'y')) t(c, d));
+----
+{"categories":[["a","c"],["x","y"]]}	true
+
+# encoded categoricals next to numeric features in a regression
+query I
+WITH m AS (SELECT ml_fit_agg('OlsRegressor', sales, list_concat(ml_transform(enc, [city, channel]), [(id % 7)::DOUBLE])) AS model FROM s, e)
+SELECT max(abs(ml_predict(model, list_concat(ml_transform(enc, [city, channel]), [(id % 7)::DOUBLE])) - sales)) < 1e-6 FROM s, m, e;
+----
+true
+
+# an encoder is not a predictive model
+statement error
+SELECT ml_predict(enc, [1.0]) FROM e;
+----
+use ml_transform
+
+statement error
+SELECT ml_fit_agg('Pca', [city]) FROM s;
+----
+does not take VARCHAR features
+
+statement error
+SELECT ml_fit_agg('OneHotEncoder', [city], '{"unknown_value": 1}') FROM s;
+----
+no parameter 'unknown_value'

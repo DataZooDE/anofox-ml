@@ -184,7 +184,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
-| `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`) |
+| `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`); `ml_transform(encoder, [VARCHAR, …])` for the categorical encoders |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
 | `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
 | `ml_outlier_score_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
@@ -194,6 +194,25 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_model_fitted(model)` | The fitted state as JSON: coefficients, centroids, components, trees, … (arrays as `{"v", "dim", "data"}`, e.g. `json_extract(ml_model_fitted(m), '$.coef.data')`) |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
+
+### Categorical Features
+
+`OneHotEncoder` and `OrdinalEncoder` work on `VARCHAR` columns, as in scikit-learn: `ml_fit_agg(kind, [col_a, col_b, …] [, params])` learns the sorted categories of every column, and `ml_transform(encoder, [col_a, col_b, …])` returns a `DOUBLE[]` to combine with numeric features via `list_concat`.
+
+| Params | Description |
+|---|---|
+| `handle_unknown` | `"error"` (default) or `"ignore"`: an unseen category encodes as all zeros (one-hot) or `unknown_value` (ordinal, default -1) |
+| `drop` | One-hot only: `"first"` drops each column's first category, `"if_binary"` only for two-category columns |
+
+Rows with a NULL value are skipped when fitting and encode as NULL; use `coalesce(col, 'missing')` to keep them as a category.
+
+```sql
+CREATE TABLE enc AS SELECT ml_fit_agg('OneHotEncoder', [city, channel], '{"handle_unknown": "ignore"}') AS e FROM train;
+CREATE TABLE model AS
+SELECT ml_fit_agg('HistGradientBoostingRegressor', sales, list_concat(ml_transform(e, [city, channel]), [price, promo])) AS m
+FROM train, enc;
+SELECT ml_predict(m, list_concat(ml_transform(e, [city, channel]), [price, promo])) FROM test, enc, model;
+```
 
 ### Text Features
 

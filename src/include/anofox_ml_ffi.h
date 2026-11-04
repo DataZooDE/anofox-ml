@@ -45,6 +45,11 @@ char *anofox_ml_predict(const uint8_t *model, size_t model_len, const double *x,
 char *anofox_ml_apply(const uint8_t *model, size_t model_len, const char *method, const double *x, size_t n_rows,
                       size_t n_cols, AnofoxMlDoubles *out, size_t *out_cols);
 
+// Fit `kind` and run the first supported of the comma-separated `methods`
+// (e.g. "labels,predict") on the training rows; the model is not kept.
+char *anofox_ml_fit_apply(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
+                          const double *y, const char *methods, AnofoxMlDoubles *out, size_t *out_cols);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

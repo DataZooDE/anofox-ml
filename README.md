@@ -6,8 +6,7 @@ into SQL: fit a model per group with an aggregate, store it as a BLOB, and
 predict with it in any later query.
 
 > **Status: early development.** The functions below work; the rest of the
-> design (clustering and outlier aggregates, metrics, fit-predict macros) is
-> tracked in sipemu/anofox-ml#91.
+> design (metrics, fit-predict macros) is tracked in sipemu/anofox-ml#91.
 
 Linear models and GLMs with statistical inference live in
 [anofox-statistics](https://github.com/DataZooDE/anofox-statistics); this
@@ -27,6 +26,8 @@ decomposition and preprocessing).
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
 | `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`) |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
+| `ml_cluster_agg(kind, [x1, x2, …] [, params])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
+| `ml_outlier_score_agg(kind, [x1, x2, …] [, params])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
 | `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version` and `crate_version` |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
@@ -53,6 +54,12 @@ SELECT ml_model_info(model).classes, ml_predict_proba(model, [x1, x2]) FROM chur
 CREATE TABLE scaler AS SELECT ml_fit_agg('StandardScaler', [price, promo]) AS model FROM train;
 SELECT ml_transform(model, [price, promo]) FROM train, scaler;
 
+-- per-row cluster labels: ORDER BY inside both aggregates keeps ids and labels aligned
+SELECT store,
+       unnest(list(id ORDER BY id)) AS id,
+       unnest(ml_cluster_agg('Hdbscan', [x, y], '{"min_cluster_size": 10}' ORDER BY id)) AS cluster
+FROM points GROUP BY store;
+
 -- what is available, and with which defaults
 SELECT kind, default_params FROM ml_estimators();
 ```
@@ -61,7 +68,10 @@ Models are stored in anofox-ml's versioned binary format (MessagePack with
 field names, zstd-compressed), which stays readable as the library evolves.
 Rows with a NULL target or feature list are skipped when fitting. For models
 with `predict_proba`, the sorted distinct training targets are stored as
-`classes`; predicting with a feature list of the wrong length is an error. Each fit runs
+`classes`; predicting with a feature list of the wrong length is an error.
+`ml_cluster_agg` and `ml_outlier_score_agg` return one entry per input row in
+input order, which is only well defined with `ORDER BY` inside the aggregate;
+rows with a NULL feature list get a NULL entry. Each fit runs
 single-threaded inside a DuckDB worker; DuckDB parallelises across groups.
 
 ## Building

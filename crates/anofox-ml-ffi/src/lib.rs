@@ -183,13 +183,13 @@ fn into_doubles(v: Vec<f64>) -> AnofoxMlDoubles {
     out
 }
 
-fn fit_impl(
+fn fit_model(
     kind: &str,
     params: &str,
     x: ArrayView2<f64>,
     y: Option<ArrayView1<f64>>,
     w: Option<ArrayView1<f64>>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Box<dyn DynModel>, String> {
     let params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
     } else {
@@ -198,6 +198,47 @@ fn fit_impl(
     let mut model = anofox_ml_registry::make(kind, &params).map_err(|e| e.to_string())?;
     POOL.with(|p| p.install(|| model.fit(x, y, w)))
         .map_err(|e| e.to_string())?;
+    Ok(model)
+}
+
+/// Run `method` of a fitted model on `x` (`labels` ignores `x`); returns the
+/// row-major output and its column count.
+fn run_method(
+    model: &dyn DynModel,
+    method: &str,
+    x: ArrayView2<f64>,
+) -> Result<(Vec<f64>, usize), String> {
+    let out = POOL.with(|p| {
+        p.install(|| match method {
+            "predict" => model.predict(x),
+            "predict_proba" => model.predict_proba(x),
+            "decision_function" => model.decision_function(x),
+            "transform" => model.transform(x),
+            "inverse_transform" => model.inverse_transform(x),
+            "score_samples" => model.score_samples(x),
+            "labels" => model.labels(),
+            _ => Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+                "unknown method '{method}'"
+            ))),
+        })
+    });
+    match out.map_err(|e| e.to_string())? {
+        Out::A1(a) => Ok((a.to_vec(), 1)),
+        Out::A2(a) => {
+            let cols = a.ncols();
+            Ok((a.as_standard_layout().iter().copied().collect(), cols))
+        }
+    }
+}
+
+fn fit_impl(
+    kind: &str,
+    params: &str,
+    x: ArrayView2<f64>,
+    y: Option<ArrayView1<f64>>,
+    w: Option<ArrayView1<f64>>,
+) -> Result<Vec<u8>, String> {
+    let model = fit_model(kind, params, x, y, w)?;
     let bytes = model.to_bytes().map_err(|e| e.to_string())?;
     let classes = match y {
         Some(y) if model.capabilities().contains(&"predict_proba") => {
@@ -214,6 +255,75 @@ fn fit_impl(
         classes,
     };
     Ok(encode(&meta, &bytes))
+}
+
+/// Fit, then run the first of the comma-separated `methods` the model
+/// supports on the training data.
+fn fit_apply_impl(
+    kind: &str,
+    params: &str,
+    x: ArrayView2<f64>,
+    y: Option<ArrayView1<f64>>,
+    methods: &str,
+) -> Result<(Vec<f64>, usize), String> {
+    let model = fit_model(kind, params, x, y, None)?;
+    let caps = model.capabilities();
+    let wanted: Vec<&str> = methods.split(',').map(str::trim).collect();
+    let method = wanted
+        .iter()
+        .find(|m| caps.contains(m))
+        .ok_or_else(|| format!("{kind} supports none of {wanted:?}"))?;
+    let (v, cols) = run_method(model.as_ref(), method, x)?;
+    if v.len() != x.nrows() * cols {
+        return Err(format!(
+            "{kind}.{method} returned {} values for {} rows",
+            v.len(),
+            x.nrows()
+        ));
+    }
+    Ok((v, cols))
+}
+
+/// Fit `kind` and run the first supported of the comma-separated `methods`
+/// (e.g. `labels,predict`) on the training rows; `out` receives
+/// `n_rows * out_cols` doubles, row-major. The model is not kept.
+///
+/// # Safety
+/// As [`anofox_ml_fit`]; `methods` is a NUL-terminated string and
+/// `out` / `out_cols` are writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_fit_apply(
+    kind: *const c_char,
+    params: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    y: *const f64,
+    methods: *const c_char,
+    out: *mut AnofoxMlDoubles,
+    out_cols: *mut usize,
+) -> *mut c_char {
+    let run = || -> Result<(Vec<f64>, usize), String> {
+        let kind = str_arg(kind, "kind")?;
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let methods = str_arg(methods, "methods")?;
+        let x = matrix(x, n_rows, n_cols)?;
+        let y = (!y.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(y, n_rows)));
+        fit_apply_impl(kind, params, x, y, methods)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok((v, cols))) => {
+            *out = into_doubles(v);
+            *out_cols = cols;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while fitting"),
+    }
 }
 
 /// Fit `kind` with JSON `params` on `x` (and `y`, `w` when non-NULL) and
@@ -275,23 +385,7 @@ fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>
                 x.ncols()
             ));
         }
-        let out = POOL.with(|p| {
-            p.install(|| match method {
-                "predict" => model.predict(x),
-                "predict_proba" => model.predict_proba(x),
-                "decision_function" => model.decision_function(x),
-                "transform" => model.transform(x),
-                "inverse_transform" => model.inverse_transform(x),
-                _ => model.score_samples(x),
-            })
-        });
-        match out.map_err(|e| e.to_string())? {
-            Out::A1(a) => Ok((a.to_vec(), 1)),
-            Out::A2(a) => {
-                let cols = a.ncols();
-                Ok((a.as_standard_layout().iter().copied().collect(), cols))
-            }
-        }
+        run_method(model, method, x)
     })
 }
 
@@ -772,5 +866,95 @@ mod tests {
         let e = apply(&blob, "predict_proba", &x, 1).unwrap_err();
         assert!(e.contains("does not support predict_proba"), "{e}");
         unsafe { anofox_ml_free_bytes(blob) };
+    }
+
+    fn fit_apply(
+        kind: &str,
+        params: &str,
+        x: &[f64],
+        n_cols: usize,
+        methods: &str,
+    ) -> Result<(Vec<f64>, usize), String> {
+        let (kind, params, methods) = (
+            CString::new(kind).unwrap(),
+            CString::new(params).unwrap(),
+            CString::new(methods).unwrap(),
+        );
+        let mut out = AnofoxMlDoubles {
+            data: std::ptr::null_mut(),
+            len: 0,
+        };
+        let mut cols = 0;
+        unsafe {
+            let e = anofox_ml_fit_apply(
+                kind.as_ptr(),
+                params.as_ptr(),
+                x.as_ptr(),
+                x.len() / n_cols,
+                n_cols,
+                std::ptr::null(),
+                methods.as_ptr(),
+                &mut out,
+                &mut cols,
+            );
+            if !e.is_null() {
+                let msg = CStr::from_ptr(e).to_str().unwrap().to_string();
+                anofox_ml_free_string(e);
+                return Err(msg);
+            }
+            let v = std::slice::from_raw_parts(out.data, out.len).to_vec();
+            anofox_ml_free_doubles(out);
+            Ok((v, cols))
+        }
+    }
+
+    /// Two well-separated blobs of 10 points each plus one far outlier.
+    fn blobs() -> Vec<f64> {
+        let mut x = Vec::new();
+        for i in 0..10 {
+            let d = i as f64 * 0.1;
+            x.extend([d, d]);
+        }
+        for i in 0..10 {
+            let d = i as f64 * 0.1;
+            x.extend([10.0 + d, 10.0 - d]);
+        }
+        x.extend([50.0, -50.0]);
+        x
+    }
+
+    #[test]
+    fn fit_apply_returns_training_labels_and_scores() {
+        let x = blobs();
+        // Dbscan: labels from the fit; the outlier is noise (-1).
+        let (labels, cols) = fit_apply(
+            "Dbscan",
+            r#"{"eps": 0.5, "min_samples": 3}"#,
+            &x,
+            2,
+            "labels,predict",
+        )
+        .unwrap();
+        assert_eq!(cols, 1);
+        assert_eq!(labels.len(), 21);
+        assert!(labels[..10].iter().all(|&l| l == labels[0]));
+        assert!(labels[10..20].iter().all(|&l| l == labels[10]));
+        assert_ne!(labels[0], labels[10]);
+        assert_eq!(labels[20], -1.0);
+        // LocalOutlierFactor: the outlier has the lowest score.
+        let (scores, _) = fit_apply(
+            "LocalOutlierFactor",
+            r#"{"n_neighbors": 5}"#,
+            &x,
+            2,
+            "score_samples,decision_function",
+        )
+        .unwrap();
+        let lowest = (0..21)
+            .min_by(|&a, &b| scores[a].total_cmp(&scores[b]))
+            .unwrap();
+        assert_eq!(lowest, 20);
+        let e = fit_apply("StandardScaler", "", &x, 2, "labels,predict").unwrap_err();
+        assert!(e.contains("supports none of"), "{e}");
     }
 }

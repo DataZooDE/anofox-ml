@@ -131,3 +131,62 @@ SELECT count(DISTINCT ml_predict(m, [a % 20, b]))
 FROM train, (SELECT ml_fit_agg('KMeans', [a % 20, b], '{"n_clusters": 3, "seed": 0}') AS m FROM train);
 ----
 3
+
+# ------------------------------------------- per-row clustering / outliers
+
+# Two separated blobs per group plus one far outlier (id 20) and one row
+# with a NULL feature list (id 21).
+statement ok
+CREATE TABLE pts AS
+SELECT g, i AS id,
+       CASE WHEN i = 21 THEN NULL
+            WHEN i = 20 THEN [50.0, -50.0]
+            WHEN i < 10 THEN [i * 0.1, i * 0.1]
+            ELSE [10.0 + (i - 10) * 0.1, 10.0 - (i - 10) * 0.1] END AS x
+FROM range(22) t(i), (VALUES ('p'), ('q')) v(g);
+
+statement ok
+CREATE TABLE clustered AS
+SELECT g, unnest(list(id ORDER BY id)) AS id,
+       unnest(ml_cluster_agg('Dbscan', x, '{"eps": 0.5, "min_samples": 3}' ORDER BY id)) AS label
+FROM pts GROUP BY g;
+
+query III
+SELECT g, count(DISTINCT label) FILTER (WHERE id < 20), max(label) FILTER (WHERE id < 10) <> max(label) FILTER (WHERE id BETWEEN 10 AND 19)
+FROM clustered GROUP BY g ORDER BY g;
+----
+p	2	true
+q	2	true
+
+query III
+SELECT g, max(label) FILTER (WHERE id = 20), bool_and(label IS NULL) FILTER (WHERE id = 21)
+FROM clustered GROUP BY g ORDER BY g;
+----
+p	-1	true
+q	-1	true
+
+# KMeans: labels of the fit.
+query I
+SELECT len(list_distinct(ml_cluster_agg('KMeans', x, '{"n_clusters": 2, "seed": 0}'))) FROM pts WHERE id < 20;
+----
+2
+
+# The outlier has the lowest score (higher = more normal, as in scikit-learn).
+query I
+SELECT arg_min(id, s) FROM (
+    SELECT unnest(list(id ORDER BY id)) AS id,
+           unnest(ml_outlier_score_agg('LocalOutlierFactor', x, '{"n_neighbors": 5}' ORDER BY id)) AS s
+    FROM pts WHERE g = 'p')
+WHERE s IS NOT NULL;
+----
+20
+
+query I
+SELECT len(ml_outlier_score_agg('IsolationForest', x, '{"seed": 0}')) FROM pts WHERE g = 'p' AND x IS NOT NULL;
+----
+21
+
+statement error
+SELECT ml_cluster_agg('StandardScaler', x) FROM pts;
+----
+supports none of

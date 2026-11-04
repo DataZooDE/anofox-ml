@@ -120,6 +120,9 @@ struct FitState {
     idx_t n_rows;
     std::vector<double> *x;
     std::vector<double> *y;
+    // One entry per input row: 1 when the row was used for fitting. Lets the
+    // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
+    std::vector<uint8_t> *used;
 };
 
 void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
@@ -132,6 +135,7 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.n_rows = 0;
     s.x = new std::vector<double>();
     s.y = new std::vector<double>();
+    s.used = new std::vector<uint8_t>();
 }
 
 void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
@@ -142,6 +146,7 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.params;
         delete s.x;
         delete s.y;
+        delete s.used;
     }
 }
 
@@ -175,7 +180,8 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
         auto xi = x_data.sel->get_index(i);
         if (!kind_data.validity.RowIsValid(ki) || (HAS_Y && !y_data.validity.RowIsValid(yi)) ||
             !x_data.validity.RowIsValid(xi)) {
-            continue; // rows with a NULL kind, target or feature list are skipped
+            s.used->push_back(0); // rows with a NULL kind, target or feature list are skipped
+            continue;
         }
         const auto &entry = lists[xi];
         if (!s.initialized) {
@@ -205,6 +211,7 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
             s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
         }
         s.n_rows++;
+        s.used->push_back(1);
     }
 }
 
@@ -214,6 +221,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
     for (idx_t i = 0; i < count; i++) {
         auto &src = *sources[i];
         auto &tgt = *targets[i];
+        tgt.used->insert(tgt.used->end(), src.used->begin(), src.used->end());
         if (!src.initialized) {
             continue;
         }
@@ -251,6 +259,59 @@ void FitFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx
         anofox_ml_free_bytes(blob);
     }
 }
+
+//===--------------------------------------------------------------------===//
+// ml_cluster_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR]) -> BIGINT[]
+// ml_outlier_score_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR]) -> DOUBLE[]
+// Fit on the group and return one value per input row, in input order (use
+// ORDER BY inside the aggregate to fix it); skipped rows get NULL.
+//===--------------------------------------------------------------------===//
+template <const char *FUNCTION, const char *METHODS, class T>
+void RowsFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    auto entries = FlatVector::GetData<list_entry_t>(result);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse(FUNCTION);
+        AnofoxMlDoubles out {nullptr, 0};
+        size_t out_cols = 0;
+        Check(anofox_ml_fit_apply(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols, nullptr,
+                                  METHODS, &out, &out_cols),
+              FUNCTION);
+        if (out_cols != 1) {
+            anofox_ml_free_doubles(out);
+            throw InvalidInputException("%s: %s returns %llu values per row", FUNCTION, s.kind->c_str(),
+                                        (unsigned long long)out_cols);
+        }
+        idx_t list_offset = ListVector::GetListSize(result);
+        idx_t n = s.used->size();
+        ListVector::Reserve(result, list_offset + n);
+        auto &child = ListVector::GetEntry(result);
+        auto child_data = FlatVector::GetData<T>(child);
+        auto &child_validity = FlatVector::Validity(child);
+        idx_t next = 0;
+        for (idx_t r = 0; r < n; r++) {
+            if ((*s.used)[r]) {
+                child_data[list_offset + r] = static_cast<T>(out.data[next++]);
+            } else {
+                child_validity.SetInvalid(list_offset + r);
+            }
+        }
+        anofox_ml_free_doubles(out);
+        ListVector::SetListSize(result, list_offset + n);
+        entries[row] = list_entry_t(list_offset, n);
+    }
+}
+
+constexpr char kClusterAgg[] = "ml_cluster_agg";
+constexpr char kClusterMethods[] = "labels,predict";
+constexpr char kOutlierAgg[] = "ml_outlier_score_agg";
+constexpr char kOutlierMethods[] = "score_samples,decision_function";
 
 //===--------------------------------------------------------------------===//
 // Row-wise model application. Consecutive rows with the same model BLOB are
@@ -464,6 +525,21 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     fit_set.AddFunction(make_fit({LogicalType::VARCHAR, features}, FitUpdate<false>));
     fit_set.AddFunction(make_fit({LogicalType::VARCHAR, features, LogicalType::VARCHAR}, FitUpdate<false>));
     loader.RegisterFunction(fit_set);
+
+    auto make_rows = [&](const char *name, LogicalType element, aggregate_finalize_t finalize) {
+        AggregateFunctionSet set(name);
+        for (auto args : {vector<LogicalType> {LogicalType::VARCHAR, features},
+                          vector<LogicalType> {LogicalType::VARCHAR, features, LogicalType::VARCHAR}}) {
+            AggregateFunction f(name, std::move(args), LogicalType::LIST(element),
+                                AggregateFunction::StateSize<FitState>, FitInitialize, FitUpdate<false>, FitCombine,
+                                finalize, nullptr, nullptr, FitDestroy);
+            f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+            set.AddFunction(f);
+        }
+        loader.RegisterFunction(set);
+    };
+    make_rows(kClusterAgg, LogicalType::BIGINT, RowsFinalize<kClusterAgg, kClusterMethods, int64_t>);
+    make_rows(kOutlierAgg, LogicalType::DOUBLE, RowsFinalize<kOutlierAgg, kOutlierMethods, double>);
 }
 
 } // namespace duckdb

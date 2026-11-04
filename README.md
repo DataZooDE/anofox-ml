@@ -280,6 +280,13 @@ Aggregates over `(y_true, y_pred)`: no model is needed, so they score any predic
 
 Pass `NULL` for `y` when a method only needs `groups`. Rows with a NULL id, or without the `y` / group the method needs, are left out.
 
+For labels that span time (a return over the next days, a churn window), `ml_purged_cv_splits_agg(id, t_start, t_end, method, options ORDER BY t_start)` purges training rows whose label interval `[t_start, t_end]` overlaps the test span, and drops `embargo` rows after it (López de Prado). Times are `DOUBLE`, e.g. `epoch(ts)`.
+
+| Method | Options |
+|---|---|
+| `purged_kfold` | `n_splits` (5), `embargo` (0 rows) |
+| `combinatorial_purged` | `n_groups` (6), `n_test_groups` (2), `embargo`. Test entries carry the backtest `path` they belong to (one entry per path); `WHERE role = 'test' AND path = k` is a complete out-of-sample backtest |
+
 ```sql
 -- 5-fold cross-validated RMSE of a random forest
 WITH folds AS (
@@ -298,7 +305,7 @@ SELECT avg(rmse), stddev(rmse) FROM (
 
 | Topic | Issue |
 |---|---|
-| Purged and spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
+| Spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Parallelism within a single fit | [#7](https://github.com/DataZooDE/anofox-ml/issues/7) |

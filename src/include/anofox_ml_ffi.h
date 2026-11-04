@@ -80,10 +80,15 @@ typedef struct {
     uint64_t *row;
     uint32_t *split;
     uint8_t *test;
+    int32_t *path; // backtest path of a combinatorial-purged test entry, else -1
     size_t len;
 } AnofoxMlSplits;
 char *anofox_ml_cv_splits(const char *method, const char *options, size_t n, const double *y, const uint64_t *groups,
                           AnofoxMlSplits *out);
+// Purged splits (purged_kfold, combinatorial_purged) of n rows in time order
+// whose labels span [t_start[i], t_end[i]].
+char *anofox_ml_purged_cv_splits(const char *method, const char *options, size_t n, const double *t_start,
+                                 const double *t_end, AnofoxMlSplits *out);
 void anofox_ml_free_splits(AnofoxMlSplits s);
 
 // anofox_ml_metric on string labels (y_true, y_pred hold n strings each).

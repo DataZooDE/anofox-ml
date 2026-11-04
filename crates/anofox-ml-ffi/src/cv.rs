@@ -24,6 +24,9 @@ struct Options {
     min_train_size: Option<usize>,
     n_bins: Option<usize>,
     p: Option<usize>,
+    embargo: Option<usize>,
+    n_groups: Option<usize>,
+    n_test_groups: Option<usize>,
 }
 
 /// What a method needs besides the row count.
@@ -198,6 +201,123 @@ pub(crate) fn cv_splits(
     Ok(out)
 }
 
+/// One split entry: (row, split, is_test, backtest path or -1).
+type Entry = (usize, usize, bool, i32);
+
+/// Purged splits of rows in time order whose labels span
+/// `[t_start[i], t_end[i]]`: `purged_kfold` or `combinatorial_purged`
+/// (whose test rows are listed once per backtest path they belong to).
+pub(crate) fn purged_splits(
+    method: &str,
+    options: &str,
+    t_start: &[f64],
+    t_end: &[f64],
+) -> Result<Vec<Entry>, String> {
+    let o: Options = if options.trim().is_empty() {
+        Options::default()
+    } else {
+        serde_json::from_str(options).map_err(|e| format!("invalid options JSON: {e}"))?
+    };
+    let embargo = o.embargo.unwrap_or(0);
+    let mut out = Vec::new();
+    match method {
+        "purged_kfold" => {
+            let s = sp::purged_k_fold(t_start, t_end, o.n_splits.unwrap_or(5), embargo)
+                .map_err(|e| e.to_string())?;
+            for (split, (train, test)) in s.iter().enumerate() {
+                out.extend(train.iter().map(|&r| (r, split, false, -1)));
+                out.extend(test.iter().map(|&r| (r, split, true, -1)));
+            }
+        }
+        "combinatorial_purged" => {
+            let c = sp::combinatorial_purged_cv(
+                t_start,
+                t_end,
+                o.n_groups.unwrap_or(6),
+                o.n_test_groups.unwrap_or(2),
+                embargo,
+            )
+            .map_err(|e| e.to_string())?;
+            let group_of = |r: usize| {
+                c.group_ranges
+                    .iter()
+                    .position(|&(a, b)| r >= a && r < b)
+                    .expect("every row is in a group")
+            };
+            for (split, (train, test)) in c.splits.iter().enumerate() {
+                out.extend(train.iter().map(|&r| (r, split, false, -1)));
+                for &r in test {
+                    let g = group_of(r);
+                    for (path, p) in c.paths.iter().enumerate() {
+                        if p[g] == split {
+                            out.push((r, split, true, path as i32));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(format!(
+                "unknown method '{method}' (known: [\"purged_kfold\", \"combinatorial_purged\"])"
+            ))
+        }
+    }
+    Ok(out)
+}
+
+/// Purged cross-validation splits of `n` rows in time order, labels spanning
+/// `[t_start[i], t_end[i]]`. As [`anofox_ml_cv_splits`]; `path` holds the
+/// backtest path of a combinatorial-purged test entry, else -1.
+///
+/// # Safety
+/// `method` / `options` are NUL-terminated (`options` may be NULL);
+/// `t_start` / `t_end` hold `n` doubles; `out` is writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_purged_cv_splits(
+    method: *const c_char,
+    options: *const c_char,
+    n: usize,
+    t_start: *const f64,
+    t_end: *const f64,
+    out: *mut AnofoxMlSplits,
+) -> *mut c_char {
+    let run = || -> Result<Vec<Entry>, String> {
+        let method = str_arg(method, "method")?;
+        let options = if options.is_null() {
+            ""
+        } else {
+            str_arg(options, "options")?
+        };
+        if t_start.is_null() || t_end.is_null() || n == 0 {
+            return Err("no rows".into());
+        }
+        purged_splits(
+            method,
+            options,
+            std::slice::from_raw_parts(t_start, n),
+            std::slice::from_raw_parts(t_end, n),
+        )
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(v)) => {
+            *out = splits_out(&v);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while splitting"),
+    }
+}
+
+fn splits_out(v: &[Entry]) -> AnofoxMlSplits {
+    AnofoxMlSplits {
+        row: leak(v.iter().map(|e| e.0 as u64).collect()),
+        split: leak(v.iter().map(|e| e.1 as u32).collect()),
+        test: leak(v.iter().map(|e| u8::from(e.2)).collect()),
+        path: leak(v.iter().map(|e| e.3).collect()),
+        len: v.len(),
+    }
+}
+
 #[repr(C)]
 pub struct AnofoxMlSplits {
     /// Input row index of each entry.
@@ -206,6 +326,8 @@ pub struct AnofoxMlSplits {
     pub split: *mut u32,
     /// 1 for a test row, 0 for a training row.
     pub test: *mut u8,
+    /// Backtest path of a combinatorial-purged test entry, else -1.
+    pub path: *mut i32,
     pub len: usize,
 }
 
@@ -245,13 +367,8 @@ pub unsafe extern "C" fn anofox_ml_cv_splits(
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(v)) => {
-            let len = v.len();
-            *out = AnofoxMlSplits {
-                row: leak(v.iter().map(|e| e.0 as u64).collect()),
-                split: leak(v.iter().map(|e| e.1 as u32).collect()),
-                test: leak(v.iter().map(|e| u8::from(e.2)).collect()),
-                len,
-            };
+            let v: Vec<Entry> = v.into_iter().map(|(r, s, t)| (r, s, t, -1)).collect();
+            *out = splits_out(&v);
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
@@ -272,6 +389,9 @@ pub unsafe extern "C" fn anofox_ml_free_splits(s: AnofoxMlSplits) {
         )));
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             s.test, s.len,
+        )));
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            s.path, s.len,
         )));
     }
 }
@@ -332,5 +452,31 @@ mod tests {
         assert!(e.contains("needs a target"), "{e}");
         let e = cv_splits("kfold", r#"{"k": 3}"#, None, None, 4).unwrap_err();
         assert!(e.contains("unknown field"), "{e}");
+    }
+
+    #[test]
+    fn purged_folds_drop_overlapping_labels() {
+        // 12 rows; every label spans 2 steps, so the training rows right
+        // before each test block overlap it and are purged.
+        let t: Vec<f64> = (0..12).map(f64::from).collect();
+        let e: Vec<f64> = t.iter().map(|v| v + 2.0).collect();
+        let v = purged_splits("purged_kfold", r#"{"n_splits": 3}"#, &t, &e).unwrap();
+        let train1: Vec<usize> = v.iter().filter(|x| x.1 == 1 && !x.2).map(|x| x.0).collect();
+        assert!(!train1.contains(&2) && !train1.contains(&3), "{train1:?}");
+        // Combinatorial: every path covers every row exactly once.
+        let v = purged_splits(
+            "combinatorial_purged",
+            r#"{"n_groups": 4, "n_test_groups": 2}"#,
+            &t,
+            &e,
+        )
+        .unwrap();
+        let n_paths = v.iter().map(|x| x.3).max().unwrap() + 1;
+        assert_eq!(n_paths, 3); // C(3, 1)
+        for p in 0..n_paths {
+            let mut rows: Vec<usize> = v.iter().filter(|x| x.2 && x.3 == p).map(|x| x.0).collect();
+            rows.sort_unstable();
+            assert_eq!(rows, (0..12).collect::<Vec<_>>());
+        }
     }
 }

@@ -15,6 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::ffi::{c_char, CStr, CString};
 use std::hash::{Hash, Hasher};
 
+mod cv;
 mod metrics;
 
 use anofox_ml_registry::{DynModel, Out};

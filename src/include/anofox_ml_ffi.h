@@ -57,6 +57,19 @@ char *anofox_ml_fit_apply(const char *kind, const char *params, const double *x,
 char *anofox_ml_metric(const char *name, const char *options, const double *y_true, const double *y_pred, size_t n,
                        size_t n_cols, const double *w, double *out);
 
+// Cross-validation splits of n rows (in the caller's order): every
+// (row, split, test) entry. y (NaN = missing) and groups (UINT64_MAX =
+// missing) may be NULL when the method doesn't use them.
+typedef struct {
+    uint64_t *row;
+    uint32_t *split;
+    uint8_t *test;
+    size_t len;
+} AnofoxMlSplits;
+char *anofox_ml_cv_splits(const char *method, const char *options, size_t n, const double *y, const uint64_t *groups,
+                          AnofoxMlSplits *out);
+void anofox_ml_free_splits(AnofoxMlSplits s);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

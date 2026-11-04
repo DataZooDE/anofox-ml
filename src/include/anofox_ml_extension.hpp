@@ -8,6 +8,7 @@ class ExtensionLoader;
 
 void RegisterMlFunctions(ExtensionLoader &loader);
 void RegisterMlMetrics(ExtensionLoader &loader);
+void RegisterMlCv(ExtensionLoader &loader);
 
 class AnofoxMlExtension : public Extension {
 public:

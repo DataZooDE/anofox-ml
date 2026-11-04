@@ -199,11 +199,44 @@ Aggregates over `(y_true, y_pred)`: no model is needed, so they score any predic
 | `ml_adjusted_rand`, `ml_normalized_mutual_info` `(labels_true, labels_pred)`, `ml_silhouette(x DOUBLE[], label)` | Clustering |
 | `ml_coverage(y, lower, upper)`, `ml_interval_score(y, lower, upper, alpha)` | Prediction intervals |
 
+### Cross-Validation
+
+`ml_cv_splits_agg(id, method, options [, y [, groups]] ORDER BY …)` returns one `STRUCT(id, split, role)` per row and split, where `role` is `'train'` or `'test'`. `unnest(…, recursive := true)` turns that into a fold table to join back to the data. The `ORDER BY` inside the aggregate fixes the row order, which is the time order for the time-series methods.
+
+| Method | Needs | Options (scikit-learn names and defaults) |
+|---|---|---|
+| `kfold`, `repeated_kfold` | — | `n_splits` (5), `shuffle`, `seed`, `n_repeats` (10) |
+| `shuffle_split` | — | `n_splits` (10), `test_size` (0.1), `seed` |
+| `leave_one_out`, `leave_p_out` | — | `p` |
+| `time_series` | — | `n_splits` (5), `test_size` (rows), `gap`, `max_train_size`, `min_train_size` |
+| `stratified_kfold`, `repeated_stratified_kfold`, `stratified_shuffle_split` | `y` | `n_splits`, `n_repeats`, `test_size`, `seed` (the stratified folds are always shuffled with `seed`) |
+| `stratified_kfold_continuous` | `y` | `n_splits`, `n_bins` (10), `seed` |
+| `group_kfold`, `leave_one_group_out`, `leave_p_groups_out`, `group_shuffle_split` | `groups` | `n_splits`, `shuffle`, `seed`, `p`, `test_size` (0.2), `train_size` |
+| `group_time_series` | `groups` (time keys, in `ORDER BY` order) | as `time_series` |
+| `stratified_group_kfold` | `y`, `groups` | `n_splits`, `shuffle`, `seed` |
+
+Pass `NULL` for `y` when a method only needs `groups`. Rows with a NULL id, or without the `y` / group the method needs, are left out.
+
+```sql
+-- 5-fold cross-validated RMSE of a random forest
+WITH folds AS (
+    SELECT unnest(ml_cv_splits_agg(id, 'kfold', '{"n_splits": 5, "shuffle": true}' ORDER BY id), recursive := true)
+    FROM train),
+f AS (SELECT * FROM folds JOIN train USING (id)),
+models AS (
+    SELECT split, ml_fit_agg('RandomForestRegressor', y, [x1, x2]) AS model
+    FROM f WHERE role = 'train' GROUP BY split)
+SELECT avg(rmse), stddev(rmse) FROM (
+    SELECT split, ml_rmse(y, ml_predict(model, [x1, x2])) AS rmse
+    FROM f JOIN models USING (split) WHERE role = 'test' GROUP BY split);
+```
+
 ### Roadmap
 
 | Topic | Issue |
 |---|---|
 | Fit-predict table macros (`ml_fit_predict_by`, `ml_cluster_by`, …) | [#2](https://github.com/DataZooDE/anofox-ml/issues/2) |
+| Purged and spatial splitters, `cross_val_predict` macros | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Sample weights and a memory guard for large groups | [#3](https://github.com/DataZooDE/anofox-ml/issues/3) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Conformal prediction intervals | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |

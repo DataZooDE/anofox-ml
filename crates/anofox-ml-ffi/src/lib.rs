@@ -20,6 +20,7 @@ mod cv;
 mod encode;
 mod inspect;
 mod metrics;
+mod stats;
 mod text;
 
 use anofox_ml_registry::{DynModel, Out};

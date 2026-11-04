@@ -280,9 +280,12 @@ dependencies = [
 name = "anofox_ml_ffi"
 version = "0.1.0"
 dependencies = [
+ "anofox-ml-cluster",
  "anofox-ml-conformal",
  "anofox-ml-core",
+ "anofox-ml-discriminant",
  "anofox-ml-metrics",
+ "anofox-ml-preprocessing",
  "anofox-ml-registry",
  "anofox-ml-text",
  "ndarray",

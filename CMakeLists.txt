@@ -118,6 +118,7 @@ set(EXTENSION_SOURCES
     src/functions/ml_cv.cpp
     src/functions/ml_macros.cpp
     src/functions/ml_text.cpp
+    src/functions/ml_stats.cpp
 )
 
 # Build static extension

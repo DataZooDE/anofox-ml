@@ -1,0 +1,72 @@
+# name: test/sql/ml_stats.test
+# description: statistic aggregates (mutual information, shrunk covariance, MeanShift bandwidth)
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# scikit-learn: ledoit_wolf(X) / oas(X) with X = [i % 7, (13 i) % 11, 2 (i % 7) + i % 3], i < 50
+query IIII
+SELECT round(c.shrinkage, 12), round(c.covariance[1][1], 12), round(c.covariance[1][3], 12), len(c.covariance)
+FROM (SELECT ml_covariance_agg([(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE, (i % 7) * 2.0 + (i % 3)]) AS c FROM range(50) t(i));
+----
+0.078839847601	4.599072356324	7.564198707441	3
+
+query III
+SELECT round(c.shrinkage, 12), round(c.covariance[1][1], 12), round(c.covariance[1][3], 12)
+FROM (SELECT ml_covariance_agg([(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE, (i % 7) * 2.0 + (i % 3)], '{"method": "oas"}') AS c FROM range(50) t(i));
+----
+0.136950017191	4.969575049608	7.087021238833
+
+# empirical (maximum likelihood) covariance: variance of 0..9 is 8.25
+query II
+SELECT c.covariance, c.shrinkage FROM (SELECT ml_covariance_agg([i::DOUBLE], '{"method": "empirical"}') AS c FROM range(10) t(i));
+----
+[[8.25]]	0.0
+
+# scikit-learn: estimate_bandwidth on a 10 x 10 grid, quantile 0.3
+query I
+SELECT round(ml_estimate_bandwidth_agg([(i % 10)::DOUBLE, (i // 10)::DOUBLE]), 6) FROM range(100) t(i);
+----
+3.833107
+
+# mutual information: informative feature > 0, noise = 0; continuous and string targets
+query II
+SELECT mi[1] > 1, mi[2] = 0 FROM (SELECT ml_mutual_info_agg((i % 30) * 2.0, [(i % 30)::DOUBLE, ((i * 7919) % 13)::DOUBLE] ORDER BY i) AS mi FROM range(300) t(i));
+----
+true	true
+
+query II
+SELECT mi[1] > 0.5, mi[2] < 0.05 FROM (SELECT ml_mutual_info_agg(CASE WHEN i % 30 < 15 THEN 'a' ELSE 'b' END, [(i % 30)::DOUBLE, ((i * 7919) % 13)::DOUBLE] ORDER BY i) AS mi FROM range(300) t(i));
+----
+true	true
+
+# discrete features by position
+query I
+SELECT len(ml_mutual_info_agg((i % 4)::DOUBLE, [(i % 4)::DOUBLE, (i % 3)::DOUBLE], '{"discrete_target": true, "discrete_features": [1, 2]}')) FROM range(120) t(i);
+----
+2
+
+# per group; empty groups give NULL
+query II
+SELECT g, ml_covariance_agg([v]).covariance FROM (VALUES (1, 1.0), (1, 3.0), (2, 5.0)) t(g, v) GROUP BY g ORDER BY g;
+----
+1	[[1.0]]
+2	[[0.0]]
+
+query I
+SELECT ml_estimate_bandwidth_agg([v]) FROM (VALUES (1.0)) t(v) WHERE false;
+----
+NULL
+
+statement error
+SELECT ml_covariance_agg([i::DOUBLE], '{"method": "robust"}') FROM range(10) t(i);
+----
+method must be
+
+statement error
+SELECT ml_mutual_info_agg(i::DOUBLE, [i::DOUBLE], '{"discrete_features": [3]}') FROM range(10) t(i);
+----
+not a feature position

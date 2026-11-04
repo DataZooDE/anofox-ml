@@ -11,6 +11,7 @@ void RegisterMlMetrics(ExtensionLoader &loader);
 void RegisterMlCv(ExtensionLoader &loader);
 void RegisterMlMacros(ExtensionLoader &loader);
 void RegisterMlText(ExtensionLoader &loader);
+void RegisterMlStats(ExtensionLoader &loader);
 
 class AnofoxMlExtension : public Extension {
 public:

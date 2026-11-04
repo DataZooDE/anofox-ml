@@ -46,9 +46,9 @@ elseif(WIN32)
     endif()
 endif()
 
-# Check for WASM target
-string(FIND "${RUST_TARGETS}" "wasm32-unknown-emscripten" WASM_TARGET_FOUND)
-if (NOT WASM_TARGET_FOUND EQUAL -1)
+# WASM only when actually building with Emscripten (the target merely being
+# installed in rustup must not switch native builds to wasm).
+if (EMSCRIPTEN)
     set(Rust_CARGO_TARGET "wasm32-unknown-emscripten")
 endif()
 

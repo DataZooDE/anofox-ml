@@ -6,7 +6,7 @@ repository.workspace = true
 description = "C ABI over anofox-ml-registry for the anofox_ml DuckDB extension"
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["staticlib"]
 
 [dependencies]
 # Until anofox-ml-registry is published on crates.io.

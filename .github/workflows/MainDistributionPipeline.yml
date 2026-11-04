@@ -21,9 +21,76 @@ jobs:
       extension_name: anofox_ml
       enable_rust: true
       reduced_ci_mode: disabled
-      # The wasm images of extension-ci-tools v1.5.6 ship rustc 1.86, but
-      # anofox-ml 0.2.0 needs 1.87 (DataZooDE/anofox-ml#29).
+      # The wasm job of extension-ci-tools v1.5.6 pins rustc 1.86, but
+      # anofox-ml 0.2 needs 1.87: the wasm builds run in the job below.
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
+
+  # DuckDB-Wasm builds: extension-ci-tools' wasm job with a current Rust
+  # toolchain instead of its pinned 1.86 (DataZooDE/anofox-ml#29).
+  wasm:
+    name: DuckDB-Wasm (${{ matrix.duckdb_arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_arch: [wasm_mvp, wasm_eh, wasm_threads]
+    env:
+      VCPKG_TARGET_TRIPLET: ${{ matrix.duckdb_arch }}
+      VCPKG_HOST_TRIPLET: x64-linux
+      VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/extension-ci-tools/vcpkg_ports
+      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/extension-ci-tools/toolchains
+      DUCKDB_PLATFORM: ${{ matrix.duckdb_arch }}
+      WASM_EXTENSIONS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'recursive'
+
+      - uses: actions/checkout@v4
+        with:
+          path: 'extension-ci-tools'
+          ref: v1.5.6
+          repository: duckdb/extension-ci-tools
+
+      - name: Checkout DuckDB to version
+        run: DUCKDB_GIT_VERSION=v1.5.6 make set_duckdb_version
+
+      - uses: emscripten-core/setup-emsdk@v13
+        with:
+          version: 3.1.71
+
+      - name: Setup Rust for cross compilation
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - name: Setup vcpkg
+        run: |
+          mkdir local_vcpkg_installation
+          cd local_vcpkg_installation
+          git init
+          git remote add origin https://github.com/microsoft/vcpkg.git
+          git fetch origin 84bab45d415d22042bd0b9081aea57f362da3f35
+          git checkout 84bab45d415d22042bd0b9081aea57f362da3f35
+          ./bootstrap-vcpkg.sh
+          echo "VCPKG_ROOT=${{ github.workspace }}/local_vcpkg_installation" >> $GITHUB_ENV
+          echo "VCPKG_TOOLCHAIN_PATH=${{ github.workspace }}/local_vcpkg_installation/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+          echo "${{ github.workspace }}/local_vcpkg_installation" >> $GITHUB_PATH
+
+      - name: Run configure
+        env:
+          DUCKDB_GIT_VERSION: v1.5.6
+        run: make configure_ci
+
+      - name: Build Wasm module
+        run: EXTENSION_NAME=anofox_ml ENABLE_EXTENSION_AUTOINSTALL=1 ENABLE_EXTENSION_AUTOLOADING=1 make ${{ matrix.duckdb_arch }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: anofox_ml-v1.5.6-extension-${{ matrix.duckdb_arch }}
+          path: build/${{ matrix.duckdb_arch }}/extension/anofox_ml/anofox_ml.duckdb_extension.wasm
 
   build-and-test-rust:
     name: Build and test Rust components

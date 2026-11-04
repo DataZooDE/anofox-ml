@@ -147,6 +147,14 @@ FROM churn_model, customers;
 CREATE TABLE scaler AS SELECT ml_fit_agg('StandardScaler', [price, promo]) AS model FROM train;
 SELECT ml_transform(model, [price, promo]) FROM train, scaler;
 
+-- t-SNE / Isomap embeddings of the training rows, one DOUBLE[] per row
+SELECT unnest(list(id ORDER BY id)) AS id,
+       unnest(ml_fit_transform_agg('TSne', [x1, x2, x3], '{"n_components": 2}' ORDER BY id)) AS xy
+FROM points;
+
+-- sample weights and the fitted state
+SELECT ml_model_fitted(ml_fit_agg('OlsRegressor', y, [x1, x2], '{}', weight)) FROM train;
+
 -- every estimator and its defaults
 SELECT kind, default_params FROM ml_estimators();
 ```
@@ -156,16 +164,18 @@ SELECT kind, default_params FROM ml_estimators();
 | Function | Description |
 |---|---|
 | `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
-| `ml_fit_agg(kind, y, [x1, x2, …] [, params])` | Aggregate: fit a model per group, returns a model `BLOB`. `params` is a JSON object merged into the defaults |
-| `ml_fit_agg(kind, [x1, x2, …] [, params])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
+| `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
+| `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`) |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
 | `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`) |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
-| `ml_cluster_agg(kind, [x1, x2, …] [, params])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
-| `ml_outlier_score_agg(kind, [x1, x2, …] [, params])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
+| `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
+| `ml_outlier_score_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
+| `ml_fit_transform_agg(kind, [y,] [x1, x2, …] [, params [, weight]])` | Aggregate: fit on the group and return each row's output (`DOUBLE[][]`): the training embedding of t-SNE, Isomap, LLE and MDS, TargetEncoder's cross-fitted encoding, or `transform` of the training rows |
 | `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version` and `crate_version` |
+| `ml_model_fitted(model)` | The fitted state as JSON: coefficients, centroids, components, trees, … (arrays as `{"v", "dim", "data"}`, e.g. `json_extract(ml_model_fitted(m), '$.coef.data')`) |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
@@ -202,8 +212,9 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 
 ## 📝 Behaviour Notes
 
-- **NULLs:** rows with a NULL target or feature list are skipped when fitting. `ml_cluster_agg` and `ml_outlier_score_agg` return a NULL entry for such rows.
-- **Row order:** `ml_cluster_agg` and `ml_outlier_score_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
+- **NULLs:** rows with a NULL target, feature list or weight are skipped when fitting. The per-row aggregates return a NULL entry for such rows.
+- **Weights:** kinds without weighted fitting reject a `weight` with an error naming the kind.
+- **Row order:** `ml_cluster_agg`, `ml_outlier_score_agg` and `ml_fit_transform_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
 - **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`.
 - **Feature count:** predicting with a feature list of the wrong length is an error.
 - **Parallelism:** DuckDB parallelises across groups. Each fit currently runs single-threaded inside a DuckDB worker, so an ungrouped fit uses one core. [#7](https://github.com/DataZooDE/anofox-ml/issues/7) proposes letting a single fit use the idle cores.

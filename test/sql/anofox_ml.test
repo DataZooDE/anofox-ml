@@ -190,3 +190,78 @@ statement error
 SELECT ml_cluster_agg('StandardScaler', x) FROM pts;
 ----
 supports none of
+
+# Sample weights: weighted mean of [0, 10] with weights [3, 1] is 2.5.
+query I
+SELECT ml_transform(ml_fit_agg('StandardScaler', [v], '{}', w), [2.5])[1] FROM (VALUES (0.0, 3.0), (10.0, 1.0)) t(v, w);
+----
+0.0
+
+# Unweighted, the mean is 5.
+query I
+SELECT ml_transform(ml_fit_agg('StandardScaler', [v]), [5.0])[1] FROM (VALUES (0.0), (10.0)) t(v);
+----
+0.0
+
+# Rows with a NULL weight are skipped.
+query I
+SELECT ml_transform(ml_fit_agg('StandardScaler', [v], '{}', w), [2.5])[1] FROM (VALUES (0.0, 3.0), (10.0, 1.0), (99.0, NULL)) t(v, w);
+----
+0.0
+
+# A supervised weighted fit: a weighted tree stump follows the heavier rows.
+query I
+SELECT ml_predict(ml_fit_agg('DecisionTreeRegressor', y, [x], '{"max_depth": 0}', w), [0.0])
+FROM (VALUES (0.0, 0.0, 1.0), (0.0, 10.0, 3.0)) t(x, y, w);
+----
+7.5
+
+statement error
+SELECT ml_fit_agg('KnnRegressor', y, [a], '{}', 1.0) FROM train;
+----
+sample_weight
+
+# ml_fit_transform_agg: training embeddings, one DOUBLE[] per row.
+query III
+SELECT len(e), len(e[1]), list_bool_and([len(r) = 2 for r in e])
+FROM (SELECT ml_fit_transform_agg('Isomap', x, '{"n_neighbors": 5, "n_components": 2}' ORDER BY id) AS e
+      FROM pts WHERE g = 'p' AND x IS NOT NULL);
+----
+21	2	true
+
+# Kinds without a stored embedding fall back to transform.
+query I
+SELECT ml_fit_transform_agg('StandardScaler', [v] ORDER BY v) FROM (VALUES (1.0), (3.0)) t(v);
+----
+[[-1.0], [1.0]]
+
+# Supervised: TargetEncoder returns its cross-fitted training encoding.
+query I
+SELECT len(ml_fit_transform_agg('TargetEncoder', y, [a % 4])) FROM train WHERE g = 'x';
+----
+400
+
+# NULL feature lists give a NULL row.
+query I
+SELECT ml_fit_transform_agg('StandardScaler', x ORDER BY id)[1] IS NULL
+FROM (VALUES (1, NULL::DOUBLE[]), (2, [1.0]), (3, [3.0])) t(id, x);
+----
+true
+
+# ml_model_fitted: the fitted state as JSON (arrays as {"v", "dim", "data"}).
+query II
+SELECT f LIKE '{"coef":{"v":1,"dim":[1],"data":[%]},"intercept":%}', f LIKE '{"centroids":%'
+FROM (SELECT ml_model_fitted(ml_fit_agg('OlsRegressor', 2 * v + 1, [v])) AS f FROM range(10) t(v));
+----
+true	false
+
+query I
+SELECT ml_model_fitted(ml_fit_agg('KMeans', [v], '{"n_clusters": 2, "seed": 0}')) LIKE '{"centroids":{"v":1,"dim":[2,1],%'
+FROM range(10) t(v);
+----
+true
+
+statement error
+SELECT ml_model_fitted('garbage'::BLOB);
+----
+not an anofox_ml model

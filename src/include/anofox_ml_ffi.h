@@ -138,6 +138,10 @@ char *anofox_ml_encode(const uint8_t *model, size_t model_len, const char *const
 // "bandwidth" (1 value).
 char *anofox_ml_stat(const char *name, const char *options, const double *x, size_t n, size_t d, const double *y,
                      const char *const *y_labels, AnofoxMlDoubles *out);
+// Multiple imputation (Hmisc aregImpute) of n_rows x n_cols row-major x
+// (NaN = missing): `out` receives n_impute completed copies one after another.
+char *anofox_ml_multiple_impute(const char *options, const double *x, size_t n_rows, size_t n_cols,
+                                AnofoxMlDoubles *out, size_t *n_impute);
 
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 

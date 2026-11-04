@@ -1,0 +1,46 @@
+# name: test/sql/ml_impute.test
+# description: multiple imputation (Hmisc aregImpute)
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+statement ok
+CREATE TABLE d AS SELECT i AS id, i::DOUBLE AS a, CASE WHEN i IN (3, 11, 25) THEN NULL ELSE 2.0 * i + (i % 3) END AS b FROM range(40) t(i);
+
+statement ok
+CREATE TABLE imp AS SELECT unnest(ml_multiple_impute_agg(id, [a, b], '{"n_impute": 3}' ORDER BY id), recursive := true) FROM d;
+
+# n_impute complete copies of every row
+query III
+SELECT count(*), count(DISTINCT imputation), bool_and(x[2] IS NOT NULL AND NOT isnan(x[2])) FROM imp;
+----
+120	3	true
+
+# observed values are kept; holes get observed donor values (predictive mean matching)
+query II
+SELECT bool_and(imp.x[2] = d.b) FILTER (WHERE d.b IS NOT NULL),
+       bool_and(imp.x[2] IN (SELECT b FROM d WHERE b IS NOT NULL)) FILTER (WHERE d.b IS NULL)
+FROM imp JOIN d USING (id);
+----
+true	true
+
+# seeded: the same imputations twice
+query I
+SELECT (SELECT list(x ORDER BY imputation, id) FROM imp)
+     = (SELECT list(x ORDER BY imputation, id) FROM (SELECT unnest(ml_multiple_impute_agg(id, [a, b], '{"n_impute": 3}' ORDER BY id), recursive := true) FROM d));
+----
+true
+
+# a model per imputation, ready for pooling with Rubin's rules
+query I
+SELECT count(*) FROM (SELECT imputation, ml_fit_agg('OlsRegressor', x[2], [x[1]]) AS m FROM imp GROUP BY imputation);
+----
+3
+
+statement error
+SELECT ml_multiple_impute_agg(id, [a, b], '{"kinds": ["numeric"]}' ORDER BY id) FROM d;
+----
+kinds has 1 entries for 2 columns

@@ -18,6 +18,7 @@ use std::hash::{Hash, Hasher};
 mod conformal;
 mod cv;
 mod encode;
+mod impute;
 mod inspect;
 mod metrics;
 mod stats;

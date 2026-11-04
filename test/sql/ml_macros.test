@@ -1,0 +1,100 @@
+# name: test/sql/ml_macros.test
+# description: one-shot table macros (ml_fit_predict_by, ml_cluster_by, ...)
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# Two stores; every 10th row has no target, row 59 has a NULL feature.
+statement ok
+CREATE TABLE sales AS SELECT i AS id, 's' || (i % 2) AS store, (i % 7)::DOUBLE AS dow,
+    CASE WHEN i = 59 THEN NULL ELSE (i % 5)::DOUBLE END AS price,
+    CASE WHEN i % 10 = 9 THEN NULL ELSE 3.0 * (i % 7) + (i % 5) END AS units
+FROM range(60) t(i);
+
+# Fits on the rows with a target and predicts every row; OLS is exact here.
+query IIII
+SELECT count(*), count(prediction), count(units), max(abs(prediction - (3.0 * dow + price))) < 1e-9
+FROM ml_fit_predict_by('sales', store, units, [dow, price], 'OlsRegressor');
+----
+60	59	54	true
+
+# Rows without a target are forecast; a NULL feature gives a NULL prediction.
+query III
+SELECT id, units IS NULL, round(prediction, 6) FROM ml_fit_predict_by('sales', store, units, [dow, price], 'OlsRegressor')
+WHERE id IN (19, 59) ORDER BY id;
+----
+19	true	19.0
+59	true	NULL
+
+# All source columns are kept, plus prediction.
+query I
+SELECT count(*) FROM (DESCRIBE FROM ml_fit_predict_by('sales', store, units, [dow, price], 'OlsRegressor'));
+----
+6
+
+# A model per group: the two stores get different models.
+query I
+SELECT count(DISTINCT prediction) > 7 FROM ml_fit_predict_by('sales', store, units, [dow], 'DecisionTreeRegressor', params := '{"max_depth": 3}');
+----
+true
+
+# Classifier probabilities with their class order.
+query III
+SELECT len(proba), classes, abs(list_sum(proba) - 1) < 1e-9
+FROM ml_fit_predict_proba_by('sales', store, (units > 10)::DOUBLE, [dow, price], 'RandomForestClassifier',
+                             params := '{"n_estimators": 20}')
+WHERE id = 0;
+----
+2	[0.0, 1.0]	true
+
+# Per-row clustering, aligned by id; a NULL feature row gets a NULL cluster.
+query III
+SELECT store, count(DISTINCT cluster), count(cluster)
+FROM ml_cluster_by('sales', store, id, [dow, price], 'KMeans', params := '{"n_clusters": 3, "seed": 0}')
+GROUP BY ALL ORDER BY store;
+----
+s0	3	30
+s1	3	29
+
+# Labels match the aggregate they come from.
+query I
+SELECT bool_and(c.cluster = a.cluster) FROM ml_cluster_by('sales', store, id, [dow, price], 'Dbscan', params := '{"eps": 0.5, "min_samples": 2}') c
+JOIN (SELECT store, unnest(list(id ORDER BY id)) AS id,
+             unnest(ml_cluster_agg('Dbscan', [dow, price], '{"eps": 0.5, "min_samples": 2}' ORDER BY id)) AS cluster
+      FROM sales GROUP BY store) a USING (store, id);
+----
+true
+
+query II
+SELECT count(outlier_score), count(*) FROM ml_outlier_score_by('sales', store, id, [dow, price], 'IsolationForest', params := '{"seed": 0}');
+----
+59	60
+
+query II
+SELECT len(features), round(list_sum(features), 6) IS NOT NULL
+FROM ml_fit_transform_by('sales', store, id, [dow, price], 'Pca', params := '{"n_components": 2}') WHERE id = 0;
+----
+2	true
+
+# Out-of-fold predictions: one per labelled row, each from a model that did not see it.
+query IIII
+SELECT count(*), count(DISTINCT id), count(DISTINCT split), max(abs(prediction - units)) < 1e-9
+FROM ml_cross_val_predict_by('sales', store, id, units, [dow, price], 'OlsRegressor', options := '{"n_splits": 3}');
+----
+54	54	3	true
+
+# Stratified folds use the target.
+query I
+SELECT count(*) FROM ml_cross_val_predict_by('sales', store, id, (units > 10)::DOUBLE, [dow, price], 'DecisionTreeClassifier',
+                                             method := 'stratified_kfold', options := '{"n_splits": 2}');
+----
+54
+
+# Errors from a fit propagate (here: 3 clusters from 1 row).
+statement error
+FROM ml_cluster_by('sales', id, id, [dow, price], 'KMeans', params := '{"n_clusters": 3}');
+----
+ml_cluster_agg

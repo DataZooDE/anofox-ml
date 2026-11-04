@@ -15,7 +15,7 @@
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 104 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. Fit-predict table macros, cross-validation and tuning are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested. Tuning, conformal prediction and the remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
 
 ## ✨ Key Features
@@ -185,6 +185,35 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
+### Table Macros
+
+One-shot workflows over a table (name as a string) and its columns. They keep every source column and add the result columns. Pass a constant such as `1` as `group_col` for a single model over the whole table. `id_col` must be unique within a group; it aligns per-row results and fixes the row order.
+
+| Macro | Adds |
+|---|---|
+| `ml_fit_predict_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`: one model per group, fitted on the rows with a target, predicting every row (also those without one) |
+| `ml_fit_predict_proba_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`, `proba DOUBLE[]` and `classes` |
+| `ml_cross_val_predict_by(source, group_col, id_col, y_col, x_cols, kind [, params := …, method := 'kfold', options := '{}'])` | `split` and the out-of-fold `prediction` of every labelled row (methods as in `ml_cv_splits_agg`) |
+| `ml_cluster_by(source, group_col, id_col, x_cols, kind [, params := …])` | `cluster` |
+| `ml_outlier_score_by(source, group_col, id_col, x_cols, kind [, params := …])` | `outlier_score` |
+| `ml_fit_transform_by(source, group_col, id_col, x_cols, kind [, params := …])` | `features DOUBLE[]` (embeddings, encodings, transforms) |
+
+```sql
+-- train and forecast in one call: rows with NULL sales get a forecast
+FROM ml_fit_predict_by('sales', store, sales, [price, promo, dow], 'HistGradientBoostingRegressor',
+                       params := '{"n_estimators": 200}');
+
+-- 5-fold cross-validated RMSE per store
+SELECT store, ml_rmse(sales, prediction) AS cv_rmse
+FROM ml_cross_val_predict_by('sales', store, id, sales, [price, promo, dow], 'RandomForestRegressor',
+                             options := '{"n_splits": 5, "shuffle": true}')
+GROUP BY store;
+
+-- clusters and outlier scores per row
+FROM ml_cluster_by('points', region, id, [x, y], 'Hdbscan', params := '{"min_cluster_size": 10}');
+FROM ml_outlier_score_by('readings', machine, id, [temp, vibration], 'IsolationForest');
+```
+
 ### Metrics
 
 Aggregates over `(y_true, y_pred)`: no model is needed, so they score any prediction, per group or over the whole table. Rows with a NULL argument are skipped and an empty group gives NULL. They are computed by anofox-ml's metrics crate and match scikit-learn.
@@ -235,8 +264,7 @@ SELECT avg(rmse), stddev(rmse) FROM (
 
 | Topic | Issue |
 |---|---|
-| Fit-predict table macros (`ml_fit_predict_by`, `ml_cluster_by`, …) | [#2](https://github.com/DataZooDE/anofox-ml/issues/2) |
-| Purged and spatial splitters, `cross_val_predict` macros | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
+| Purged and spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Sample weights and a memory guard for large groups | [#3](https://github.com/DataZooDE/anofox-ml/issues/3) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Conformal prediction intervals | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
@@ -265,7 +293,7 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 
 ## 📝 Behaviour Notes
 
-- **NULLs:** rows with a NULL target, feature list or weight are skipped when fitting. The per-row aggregates return a NULL entry for such rows.
+- **NULLs:** rows with a NULL target, weight, feature list or NULL value inside the feature list are skipped when fitting, and predict NULL. The per-row aggregates return a NULL entry for such rows.
 - **Weights:** kinds without weighted fitting reject a `weight` with an error naming the kind.
 - **Row order:** `ml_cluster_agg`, `ml_outlier_score_agg` and `ml_fit_transform_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
 - **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`.

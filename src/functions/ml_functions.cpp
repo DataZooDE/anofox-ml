@@ -35,6 +35,17 @@ std::string TakeString(char *s) {
     return out;
 }
 
+// True when a feature list holds a NULL element; such rows are treated like
+// a NULL feature list (skipped when fitting, NULL when predicting).
+bool HasNullElement(const UnifiedVectorFormat &child_data, const list_entry_t &entry) {
+    for (idx_t j = 0; j < entry.length; j++) {
+        if (!child_data.validity.RowIsValid(child_data.sel->get_index(entry.offset + j))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void CaptureUse(const char *function) {
 #ifdef ANOFOX_TELEMETRY_ENABLED
     PostHogTelemetry::Instance().CaptureFunctionExecution(function);
@@ -194,6 +205,10 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
             continue;
         }
         const auto &entry = lists[xi];
+        if (HasNullElement(child_data, entry)) {
+            s.used->push_back(0);
+            continue;
+        }
         if (!s.initialized) {
             s.initialized = true;
             s.has_y = HAS_Y;
@@ -212,11 +227,7 @@ void FitUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector 
                                         (unsigned long long)s.n_cols, (unsigned long long)entry.length);
         }
         for (idx_t j = 0; j < entry.length; j++) {
-            auto vi = child_data.sel->get_index(entry.offset + j);
-            if (!child_data.validity.RowIsValid(vi)) {
-                throw InvalidInputException("ml_fit_agg: feature lists must not contain NULL");
-            }
-            s.x->push_back(values[vi]);
+            s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
         }
         if (HAS_Y) {
             s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
@@ -434,6 +445,10 @@ void ApplyBatched(DataChunk &args, const char *function, const char *method, Vec
         }
         const auto &model = models[mi];
         const auto &entry = lists[xi];
+        if (HasNullElement(child_data, entry)) {
+            validity.SetInvalid(i);
+            continue;
+        }
         bool same = !rows.empty() && model.GetSize() == current.GetSize() &&
                     (model.GetData() == current.GetData() ||
                      memcmp(model.GetData(), current.GetData(), model.GetSize()) == 0);
@@ -443,11 +458,7 @@ void ApplyBatched(DataChunk &args, const char *function, const char *method, Vec
             n_cols = entry.length;
         }
         for (idx_t j = 0; j < entry.length; j++) {
-            auto vi = child_data.sel->get_index(entry.offset + j);
-            if (!child_data.validity.RowIsValid(vi)) {
-                throw InvalidInputException("%s: feature lists must not contain NULL", function);
-            }
-            x.push_back(values[vi]);
+            x.push_back(values[child_data.sel->get_index(entry.offset + j)]);
         }
         rows.push_back(i);
     }

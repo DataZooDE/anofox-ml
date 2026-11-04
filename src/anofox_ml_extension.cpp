@@ -58,6 +58,7 @@ void LoadInternal(ExtensionLoader &loader) {
     RegisterMlFunctions(loader);
     RegisterMlMetrics(loader);
     RegisterMlCv(loader);
+    RegisterMlMacros(loader);
 }
 
 void AnofoxMlExtension::Load(ExtensionLoader &loader) {

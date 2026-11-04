@@ -265,3 +265,17 @@ statement error
 SELECT ml_model_fitted('garbage'::BLOB);
 ----
 not an anofox_ml model
+
+# A NULL inside a feature list: the row is skipped when fitting and predicts NULL.
+query II
+SELECT ml_predict(m, [1.0, NULL]) IS NULL, ml_predict(m, [1.0, 1.0]) FROM (
+    SELECT ml_fit_agg('OlsRegressor', y, [a, b]) AS m
+    FROM (VALUES (1.0, 0.0, 1.0), (2.0, 1.0, 1.0), (3.0, 2.0, 1.0), (99.0, NULL, 1.0)) t(y, a, b));
+----
+true	2.0
+
+query I
+SELECT ml_cluster_agg('KMeans', x, '{"n_clusters": 2}' ORDER BY id)[2] IS NULL
+FROM (VALUES (1, [0.0]), (2, [NULL::DOUBLE]), (3, [5.0]), (4, [0.1]), (5, [5.1])) t(id, x);
+----
+true

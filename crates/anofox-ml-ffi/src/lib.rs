@@ -23,6 +23,7 @@ mod inspect;
 mod metrics;
 mod stats;
 mod text;
+mod tune;
 
 use anofox_ml_registry::{DynModel, Out};
 use ndarray::{ArrayView1, ArrayView2};

@@ -142,6 +142,18 @@ char *anofox_ml_stat(const char *name, const char *options, const double *x, siz
 // (NaN = missing): `out` receives n_impute completed copies one after another.
 char *anofox_ml_multiple_impute(const char *options, const double *x, size_t n_rows, size_t n_cols,
                                 AnofoxMlDoubles *out, size_t *n_impute);
+// Hyperparameter search (grid / random) with k-fold CV; y as doubles or
+// y_labels as strings (the other NULL). Release with anofox_ml_free_tune_result.
+typedef struct {
+    char *best_params; // JSON
+    double best_score;
+    AnofoxMlBytes model; // refitted on all rows
+    char *trials;        // JSON array
+} AnofoxMlTuneResult;
+char *anofox_ml_tune(const char *kind, const char *space, const char *options, const double *x, size_t n_rows,
+                     size_t n_cols, const double *y, const char *const *y_labels, size_t threads,
+                     AnofoxMlTuneResult *out);
+void anofox_ml_free_tune_result(AnofoxMlTuneResult r);
 
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 

@@ -138,6 +138,7 @@ struct FitState {
     bool has_labels;
     std::vector<std::string> *sx; // VARCHAR features of an encoder (string_x)
     bool string_x;
+    std::string *options; // ml_tune_agg options
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -159,6 +160,7 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.has_labels = false;
     s.sx = new std::vector<std::string>();
     s.string_x = false;
+    s.options = new std::string();
     s.used = new std::vector<uint8_t>();
 }
 
@@ -173,6 +175,7 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.w;
         delete s.labels;
         delete s.sx;
+        delete s.options;
         delete s.used;
     }
 }
@@ -376,6 +379,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
             tgt.has_w = src.has_w;
             tgt.has_labels = src.has_labels;
             tgt.string_x = src.string_x;
+            *tgt.options = *src.options;
             *tgt.kind = *src.kind;
             *tgt.params = *src.params;
             tgt.n_cols = src.n_cols;
@@ -429,6 +433,68 @@ void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
         FlatVector::GetData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_tune_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[], search_space VARCHAR [, options VARCHAR])
+//   -> STRUCT(best_params VARCHAR, best_score DOUBLE, model BLOB, trials VARCHAR)
+// Grid / random search with k-fold CV; the search space rides in `params`.
+//===--------------------------------------------------------------------===//
+template <bool LABELS>
+void TuneUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
+    FitUpdate<true, false, LABELS>(inputs, aggr, 4, state_vector, count);
+    if (input_count < 5) {
+        return;
+    }
+    UnifiedVectorFormat options_data, sdata;
+    inputs[4].ToUnifiedFormat(count, options_data);
+    state_vector.ToUnifiedFormat(count, sdata);
+    auto states = reinterpret_cast<FitState **>(sdata.data);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[sdata.sel->get_index(i)];
+        auto oi = options_data.sel->get_index(i);
+        if (s.options->empty() && options_data.validity.RowIsValid(oi)) {
+            *s.options = UnifiedVectorFormat::GetData<string_t>(options_data)[oi].GetString();
+        }
+    }
+}
+
+LogicalType TuneType() {
+    child_list_t<LogicalType> fields;
+    fields.emplace_back("best_params", LogicalType(LogicalTypeId::VARCHAR));
+    fields.emplace_back("best_score", LogicalType(LogicalTypeId::DOUBLE));
+    fields.emplace_back("model", LogicalType(LogicalTypeId::BLOB));
+    fields.emplace_back("trials", LogicalType(LogicalTypeId::VARCHAR));
+    return LogicalType::STRUCT(std::move(fields));
+}
+
+void TuneFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    auto &fields = StructVector::GetEntries(result);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_tune_agg");
+        std::vector<const char *> labels;
+        for (const auto &l : *s.labels) {
+            labels.push_back(l.c_str());
+        }
+        AnofoxMlTuneResult r {};
+        Check(anofox_ml_tune(s.kind->c_str(), s.params->c_str(), s.options->c_str(), s.x->data(), s.n_rows,
+                             s.n_cols, s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
+                             FitThreads(aggr), &r),
+              "ml_tune_agg");
+        FlatVector::GetData<string_t>(*fields[0])[row] = StringVector::AddString(*fields[0], r.best_params);
+        FlatVector::GetData<double>(*fields[1])[row] = r.best_score;
+        FlatVector::GetData<string_t>(*fields[2])[row] =
+            StringVector::AddStringOrBlob(*fields[2], reinterpret_cast<const char *>(r.model.data), r.model.len);
+        FlatVector::GetData<string_t>(*fields[3])[row] = StringVector::AddString(*fields[3], r.trials);
+        anofox_ml_free_tune_result(r);
     }
 }
 
@@ -1224,6 +1290,22 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     fit_set.AddFunction(make_fit({V, V, features}, FitUpdate<true, false, true>));
     fit_set.AddFunction(make_fit({V, V, features, V}, FitUpdate<true, false, true>));
     fit_set.AddFunction(make_fit({V, V, features, V, LogicalType(LogicalTypeId::DOUBLE)}, FitUpdate<true, true, true>));
+    AggregateFunctionSet tune_set("ml_tune_agg");
+    for (bool labels : {false, true}) {
+        for (bool options : {false, true}) {
+            vector<LogicalType> args {V, LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE), features,
+                                      V};
+            if (options) {
+                args.push_back(V);
+            }
+            AggregateFunction f("ml_tune_agg", args, TuneType(), AggregateFunction::StateSize<FitState>,
+                                FitInitialize, labels ? TuneUpdate<true> : TuneUpdate<false>, FitCombine,
+                                TuneFinalize, nullptr, FitBind, FitDestroy);
+            f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+            tune_set.AddFunction(f);
+        }
+    }
+    loader.RegisterFunction(tune_set);
     // Categorical encoders on VARCHAR features.
     const auto string_features = LogicalType::LIST(V);
     fit_set.AddFunction(make_fit({V, string_features}, EncodeUpdate));

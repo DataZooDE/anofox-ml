@@ -1,0 +1,60 @@
+# name: test/sql/ml_text.test
+# description: hashing vectorizer (scikit-learn HashingVectorizer)
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# scikit-learn: HashingVectorizer(n_features=16).transform([doc])
+query II
+SELECT s.indices, list_bool_and(list_transform(list_zip(s.values, [0.242535625036, -0.485071250073, 0.242535625036, 0.242535625036, 0.242535625036, -0.727606875109]), p -> abs(p[1] - p[2]) < 1e-9))
+FROM (SELECT ml_hashing_vectorize_sparse('The quick brown fox jumps over the lazy dog the end', 16) AS s);
+----
+[0, 7, 9, 11, 13, 14]	true
+
+# raw counts
+query I
+SELECT ml_hashing_vectorize_sparse('The quick brown fox jumps over the lazy dog the end', 16, '{"alternate_sign": false, "norm": null}');
+----
+{'indices': [0, 5, 7, 9, 11, 13, 14], 'values': [1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 3.0]}
+
+# dense: same values at the same (1-based) positions
+query II
+SELECT len(d), d[15] = s.values[6]
+FROM (SELECT ml_hashing_vectorize('The quick brown fox jumps over the lazy dog the end', 16) AS d,
+             ml_hashing_vectorize_sparse('The quick brown fox jumps over the lazy dog the end', 16) AS s);
+----
+16	true
+
+# single-character tokens are dropped, as with scikit-learn's default token pattern
+query I
+SELECT list_sum(ml_hashing_vectorize('a b c', 8, '{"norm": null}'));
+----
+0.0
+
+query I
+SELECT ml_hashing_vectorize(NULL, 8) IS NULL;
+----
+true
+
+# a tiny text classifier on hashed features
+query I
+WITH docs AS (SELECT * FROM (VALUES
+    ('cheap pills buy now', 'spam'), ('buy cheap watches now', 'spam'), ('win money now', 'spam'),
+    ('meeting agenda attached', 'ham'), ('lunch tomorrow with team', 'ham'), ('project meeting notes', 'ham')) t(text, label)),
+m AS (SELECT ml_fit_agg('MultinomialNB', label, ml_hashing_vectorize(text, 64, '{"alternate_sign": false}')) AS model FROM docs)
+SELECT ml_predict_label(model, ml_hashing_vectorize('buy cheap now', 64, '{"alternate_sign": false}')) FROM m;
+----
+spam
+
+statement error
+SELECT ml_hashing_vectorize('x y', 0);
+----
+n_features must be positive
+
+statement error
+SELECT ml_hashing_vectorize('xx yy', 8, '{"norm": "l1"}');
+----
+norm must be

@@ -195,6 +195,19 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
+### Text Features
+
+| Function | Description |
+|---|---|
+| `ml_hashing_vectorize(text, n_features [, options])` | scikit-learn's `HashingVectorizer`: unigram tokens (2+ word characters) hashed into `n_features` buckets, as a dense `DOUBLE[]` to feed estimators directly. Options: `alternate_sign` (true), `norm` (`"l2"` or `null` for counts) |
+| `ml_hashing_vectorize_sparse(text, n_features [, options])` | The same as `STRUCT(indices INTEGER[], values DOUBLE[])`, buckets 0-based, for large `n_features` |
+
+```sql
+CREATE TABLE spam_model AS
+SELECT ml_fit_agg('MultinomialNB', label, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) AS model FROM mails;
+SELECT ml_predict_label(model, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) FROM new_mails, spam_model;
+```
+
 ### Conformal Prediction
 
 Split conformal prediction: calibrate a fitted model on held-out rows, then ask for prediction intervals (regressors) or prediction sets (classifiers) at any miscoverage `alpha`. Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.

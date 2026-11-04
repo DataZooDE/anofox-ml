@@ -15,6 +15,7 @@ anofox-ml-core = { git = "https://github.com/sipemu/anofox-ml", branch = "master
 anofox-ml-registry = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
 anofox-ml-metrics = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
 anofox-ml-conformal = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
+anofox-ml-text = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
 ndarray = "0.16"
 rand = "0.8"
 rayon = "1.10"

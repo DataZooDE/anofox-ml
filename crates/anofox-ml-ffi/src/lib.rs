@@ -19,6 +19,7 @@ mod conformal;
 mod cv;
 mod inspect;
 mod metrics;
+mod text;
 
 use anofox_ml_registry::{DynModel, Out};
 use ndarray::{ArrayView1, ArrayView2};

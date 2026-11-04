@@ -3,6 +3,7 @@
 // released with anofox_ml_free_string.
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -114,6 +115,11 @@ char *anofox_ml_predict_set(const uint8_t *model, size_t model_len, const double
 char *anofox_ml_permutation_importance(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,
                                        size_t n_cols, const double *y, const char *const *y_labels,
                                        const char *options, AnofoxMlDoubles *out);
+
+// scikit-learn HashingVectorizer of one document into n_features buckets:
+// dense -> n_features values; sparse -> the nnz buckets (0-based) then their values.
+char *anofox_ml_hashing_vectorize(const char *text, size_t n_features, const char *options, bool dense,
+                                  AnofoxMlDoubles *out);
 
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 

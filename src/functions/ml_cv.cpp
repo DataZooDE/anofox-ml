@@ -333,11 +333,11 @@ void PurgedFinalize(Vector &state_vector, AggregateInputData &, Vector &result, 
 
 void RegisterMlCv(ExtensionLoader &loader) {
     child_list_t<LogicalType> fields;
-    fields.emplace_back("id", LogicalType::BIGINT);
-    fields.emplace_back("split", LogicalType::INTEGER);
-    fields.emplace_back("role", LogicalType::VARCHAR);
+    fields.emplace_back("id", LogicalType(LogicalTypeId::BIGINT));
+    fields.emplace_back("split", LogicalType(LogicalTypeId::INTEGER));
+    fields.emplace_back("role", LogicalType(LogicalTypeId::VARCHAR));
     const auto result = LogicalType::LIST(LogicalType::STRUCT(std::move(fields)));
-    const auto B = LogicalType::BIGINT, V = LogicalType::VARCHAR, D = LogicalType::DOUBLE;
+    const auto B = LogicalType(LogicalTypeId::BIGINT), V = LogicalType(LogicalTypeId::VARCHAR), D = LogicalType(LogicalTypeId::DOUBLE);
 
     AggregateFunctionSet set(kFunction);
     auto add = [&](vector<LogicalType> args, aggregate_update_t update) {

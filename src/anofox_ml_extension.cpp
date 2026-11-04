@@ -41,8 +41,8 @@ static const char *TELEMETRY_KEY = "phc_t3wwRLtpyEmLHYaZCSszG0MqVr74J6wnCrj9D41z
 static void RegisterTelemetryOptions(ExtensionLoader &loader) {
     auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
     config.AddExtensionOption("anofox_telemetry_enabled", "Enable or disable anonymous usage telemetry",
-                              LogicalType::BOOLEAN, Value::BOOLEAN(true), OnTelemetryEnabled);
-    config.AddExtensionOption("anofox_telemetry_key", "PostHog API key for telemetry", LogicalType::VARCHAR,
+                              LogicalType(LogicalTypeId::BOOLEAN), Value::BOOLEAN(true), OnTelemetryEnabled);
+    config.AddExtensionOption("anofox_telemetry_key", "PostHog API key for telemetry", LogicalType(LogicalTypeId::VARCHAR),
                               Value(TELEMETRY_KEY), OnTelemetryKey);
 }
 
@@ -53,7 +53,7 @@ void LoadInternal(ExtensionLoader &loader) {
     config.AddExtensionOption("anofox_ml_max_fit_values",
                               "Largest training set (rows x features) one fitting aggregate may hold in memory per "
                               "group; 0 = unlimited",
-                              LogicalType::UBIGINT, Value::UBIGINT(100000000));
+                              LogicalType(LogicalTypeId::UBIGINT), Value::UBIGINT(100000000));
 #ifdef ANOFOX_TELEMETRY_ENABLED
     RegisterTelemetryOptions(loader);
     auto &telemetry = PostHogTelemetry::Instance();

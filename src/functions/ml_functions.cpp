@@ -83,7 +83,7 @@ struct EstimatorsState : public GlobalTableFunctionState {
 unique_ptr<FunctionData> EstimatorsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
                                         vector<string> &names) {
     names = {"kind", "default_params"};
-    types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+    types = {LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::VARCHAR)};
     return nullptr;
 }
 
@@ -594,8 +594,8 @@ void ByAlpha(DataChunk &args, Vector &result, std::vector<idx_t> &rows, std::vec
 
 LogicalType IntervalType() {
     child_list_t<LogicalType> fields;
-    fields.emplace_back("lower", LogicalType::DOUBLE);
-    fields.emplace_back("upper", LogicalType::DOUBLE);
+    fields.emplace_back("lower", LogicalType(LogicalTypeId::DOUBLE));
+    fields.emplace_back("upper", LogicalType(LogicalTypeId::DOUBLE));
     return LogicalType::STRUCT(std::move(fields));
 }
 
@@ -898,14 +898,14 @@ void MlModelFittedFunction(DataChunk &args, ExpressionState &state, Vector &resu
 //===--------------------------------------------------------------------===//
 LogicalType ModelInfoType() {
     child_list_t<LogicalType> fields;
-    fields.emplace_back("kind", LogicalType::VARCHAR);
-    fields.emplace_back("n_features", LogicalType::BIGINT);
-    fields.emplace_back("classes", LogicalType::LIST(LogicalType::DOUBLE));
-    fields.emplace_back("capabilities", LogicalType::LIST(LogicalType::VARCHAR));
-    fields.emplace_back("params", LogicalType::VARCHAR);
-    fields.emplace_back("format_version", LogicalType::INTEGER);
-    fields.emplace_back("crate_version", LogicalType::VARCHAR);
-    fields.emplace_back("labels", LogicalType::LIST(LogicalType::VARCHAR));
+    fields.emplace_back("kind", LogicalType(LogicalTypeId::VARCHAR));
+    fields.emplace_back("n_features", LogicalType(LogicalTypeId::BIGINT));
+    fields.emplace_back("classes", LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)));
+    fields.emplace_back("capabilities", LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
+    fields.emplace_back("params", LogicalType(LogicalTypeId::VARCHAR));
+    fields.emplace_back("format_version", LogicalType(LogicalTypeId::INTEGER));
+    fields.emplace_back("crate_version", LogicalType(LogicalTypeId::VARCHAR));
+    fields.emplace_back("labels", LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
     return LogicalType::STRUCT(std::move(fields));
 }
 
@@ -924,13 +924,13 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
         Check(anofox_ml_model_info(reinterpret_cast<const uint8_t *>(models[mi].GetData()), models[mi].GetSize(),
                                    &info),
               "ml_model_info");
-        Value classes(LogicalType::LIST(LogicalType::DOUBLE));
+        Value classes(LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)));
         if (info.classes.data) {
             vector<Value> c;
             for (size_t j = 0; j < info.classes.len; j++) {
                 c.push_back(Value::DOUBLE(info.classes.data[j]));
             }
-            classes = Value::LIST(LogicalType::DOUBLE, std::move(c));
+            classes = Value::LIST(LogicalType(LogicalTypeId::DOUBLE), std::move(c));
         }
         vector<Value> caps;
         std::string all(info.capabilities ? info.capabilities : "");
@@ -946,7 +946,7 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
         fields.emplace_back("kind", Value(info.kind ? info.kind : ""));
         fields.emplace_back("n_features", Value::BIGINT(info.n_features));
         fields.emplace_back("classes", std::move(classes));
-        fields.emplace_back("capabilities", Value::LIST(LogicalType::VARCHAR, std::move(caps)));
+        fields.emplace_back("capabilities", Value::LIST(LogicalType(LogicalTypeId::VARCHAR), std::move(caps)));
         fields.emplace_back("params", Value(info.params ? info.params : ""));
         fields.emplace_back("format_version", Value::INTEGER(info.format_version));
         fields.emplace_back("crate_version", Value(info.crate_version ? info.crate_version : ""));
@@ -954,7 +954,7 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
         for (size_t j = 0; j < info.labels.len; j++) {
             labels.push_back(Value(info.labels.data[j]));
         }
-        fields.emplace_back("labels", Value::LIST(LogicalType::VARCHAR, std::move(labels)));
+        fields.emplace_back("labels", Value::LIST(LogicalType(LogicalTypeId::VARCHAR), std::move(labels)));
         anofox_ml_free_model_info(info);
         result.SetValue(i, Value::STRUCT(std::move(fields)));
     }
@@ -966,29 +966,29 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
 } // anonymous namespace
 
 void RegisterMlFunctions(ExtensionLoader &loader) {
-    loader.RegisterFunction(ScalarFunction("ml_version", {}, LogicalType::VARCHAR, MlVersionFunction));
+    loader.RegisterFunction(ScalarFunction("ml_version", {}, LogicalType(LogicalTypeId::VARCHAR), MlVersionFunction));
     loader.RegisterFunction(
-        ScalarFunction("ml_model_kind", {LogicalType::BLOB}, LogicalType::VARCHAR, MlModelKindFunction));
+        ScalarFunction("ml_model_kind", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelKindFunction));
     loader.RegisterFunction(
-        ScalarFunction("ml_model_info", {LogicalType::BLOB}, ModelInfoType(), MlModelInfoFunction));
+        ScalarFunction("ml_model_info", {LogicalType(LogicalTypeId::BLOB)}, ModelInfoType(), MlModelInfoFunction));
     loader.RegisterFunction(
-        ScalarFunction("ml_model_fitted", {LogicalType::BLOB}, LogicalType::VARCHAR, MlModelFittedFunction));
-    const vector<LogicalType> model_and_x {LogicalType::BLOB, LogicalType::LIST(LogicalType::DOUBLE)};
-    loader.RegisterFunction(ScalarFunction("ml_predict", model_and_x, LogicalType::DOUBLE, MlPredictFunction));
+        ScalarFunction("ml_model_fitted", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelFittedFunction));
+    const vector<LogicalType> model_and_x {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};
+    loader.RegisterFunction(ScalarFunction("ml_predict", model_and_x, LogicalType(LogicalTypeId::DOUBLE), MlPredictFunction));
     loader.RegisterFunction(
-        ScalarFunction("ml_predict_label", model_and_x, LogicalType::VARCHAR, MlPredictLabelFunction));
-    const vector<LogicalType> model_x_alpha {LogicalType::BLOB, LogicalType::LIST(LogicalType::DOUBLE),
-                                             LogicalType::DOUBLE};
+        ScalarFunction("ml_predict_label", model_and_x, LogicalType(LogicalTypeId::VARCHAR), MlPredictLabelFunction));
+    const vector<LogicalType> model_x_alpha {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
+                                             LogicalType(LogicalTypeId::DOUBLE)};
     loader.RegisterFunction(
         ScalarFunction("ml_predict_interval", model_x_alpha, IntervalType(), MlPredictIntervalFunction));
-    loader.RegisterFunction(ScalarFunction("ml_predict_set", model_x_alpha, LogicalType::LIST(LogicalType::VARCHAR),
+    loader.RegisterFunction(ScalarFunction("ml_predict_set", model_x_alpha, LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)),
                                            MlPredictSetFunction));
     AggregateFunctionSet conformal_set("ml_conformalize_agg");
     for (bool labels : {false, true}) {
         AggregateFunction f("ml_conformalize_agg",
-                            {LogicalType::BLOB, LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
-                             LogicalType::LIST(LogicalType::DOUBLE)},
-                            LogicalType::BLOB, AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
+                            {LogicalType(LogicalTypeId::BLOB), LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
+                             LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))},
+                            LogicalType(LogicalTypeId::BLOB), AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
                             labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine,
                             ConformalFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
                             ConformalDestroy);
@@ -1004,11 +1004,11 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     AggregateFunctionSet importance_set("ml_permutation_importance_agg");
     for (bool labels : {false, true}) {
         for (bool options : {false, true}) {
-            vector<LogicalType> args {LogicalType::BLOB,
+            vector<LogicalType> args {LogicalType(LogicalTypeId::BLOB),
                                       LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
-                                      LogicalType::LIST(LogicalType::DOUBLE)};
+                                      LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};
             if (options) {
-                args.push_back(LogicalType::VARCHAR);
+                args.push_back(LogicalType(LogicalTypeId::VARCHAR));
             }
             AggregateFunction f("ml_permutation_importance_agg", args, importance_type,
                                 AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
@@ -1025,34 +1025,34 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         {"ml_score_samples", "score_samples"},
     };
     for (const auto &f : list_functions) {
-        loader.RegisterFunction(ScalarFunction(f.first, model_and_x, LogicalType::LIST(LogicalType::DOUBLE),
+        loader.RegisterFunction(ScalarFunction(f.first, model_and_x, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
                                                MakeListFunction(f.first, f.second)));
     }
     loader.RegisterFunction(TableFunction("ml_estimators", {}, EstimatorsFunction, EstimatorsBind, EstimatorsInit));
 
     AggregateFunctionSet fit_set("ml_fit_agg");
     auto make_fit = [](vector<LogicalType> args, aggregate_update_t update) {
-        AggregateFunction f("ml_fit_agg", std::move(args), LogicalType::BLOB, AggregateFunction::StateSize<FitState>,
+        AggregateFunction f("ml_fit_agg", std::move(args), LogicalType(LogicalTypeId::BLOB), AggregateFunction::StateSize<FitState>,
                             FitInitialize, update, FitCombine, FitFinalize, nullptr, FitBind, FitDestroy);
         f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
         return f;
     };
-    const auto features = LogicalType::LIST(LogicalType::DOUBLE);
-    fit_set.AddFunction(make_fit({LogicalType::VARCHAR, LogicalType::DOUBLE, features}, FitUpdate<true>));
+    const auto features = LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE));
+    fit_set.AddFunction(make_fit({LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE), features}, FitUpdate<true>));
     fit_set.AddFunction(
-        make_fit({LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR}, FitUpdate<true>));
-    fit_set.AddFunction(make_fit({LogicalType::VARCHAR, features}, FitUpdate<false>));
-    fit_set.AddFunction(make_fit({LogicalType::VARCHAR, features, LogicalType::VARCHAR}, FitUpdate<false>));
+        make_fit({LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE), features, LogicalType(LogicalTypeId::VARCHAR)}, FitUpdate<true>));
+    fit_set.AddFunction(make_fit({LogicalType(LogicalTypeId::VARCHAR), features}, FitUpdate<false>));
+    fit_set.AddFunction(make_fit({LogicalType(LogicalTypeId::VARCHAR), features, LogicalType(LogicalTypeId::VARCHAR)}, FitUpdate<false>));
     fit_set.AddFunction(make_fit(
-        {LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR, LogicalType::DOUBLE},
+        {LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE), features, LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE)},
         FitUpdate<true, true>));
     fit_set.AddFunction(
-        make_fit({LogicalType::VARCHAR, features, LogicalType::VARCHAR, LogicalType::DOUBLE}, FitUpdate<false, true>));
+        make_fit({LogicalType(LogicalTypeId::VARCHAR), features, LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE)}, FitUpdate<false, true>));
     // String class labels.
-    const auto V = LogicalType::VARCHAR;
+    const auto V = LogicalType(LogicalTypeId::VARCHAR);
     fit_set.AddFunction(make_fit({V, V, features}, FitUpdate<true, false, true>));
     fit_set.AddFunction(make_fit({V, V, features, V}, FitUpdate<true, false, true>));
-    fit_set.AddFunction(make_fit({V, V, features, V, LogicalType::DOUBLE}, FitUpdate<true, true, true>));
+    fit_set.AddFunction(make_fit({V, V, features, V, LogicalType(LogicalTypeId::DOUBLE)}, FitUpdate<true, true, true>));
     loader.RegisterFunction(fit_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;
@@ -1068,22 +1068,22 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         loader.RegisterFunction(set);
     };
     const vector<Overload> unsupervised {
-        {{LogicalType::VARCHAR, features}, FitUpdate<false>},
-        {{LogicalType::VARCHAR, features, LogicalType::VARCHAR}, FitUpdate<false>},
-        {{LogicalType::VARCHAR, features, LogicalType::VARCHAR, LogicalType::DOUBLE}, FitUpdate<false, true>},
+        {{LogicalType(LogicalTypeId::VARCHAR), features}, FitUpdate<false>},
+        {{LogicalType(LogicalTypeId::VARCHAR), features, LogicalType(LogicalTypeId::VARCHAR)}, FitUpdate<false>},
+        {{LogicalType(LogicalTypeId::VARCHAR), features, LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE)}, FitUpdate<false, true>},
     };
-    make_rows(kClusterAgg, LogicalType::LIST(LogicalType::BIGINT),
+    make_rows(kClusterAgg, LogicalType::LIST(LogicalType(LogicalTypeId::BIGINT)),
               RowsFinalize<kClusterAgg, kClusterMethods, int64_t>, unsupervised);
-    make_rows(kOutlierAgg, LogicalType::LIST(LogicalType::DOUBLE),
+    make_rows(kOutlierAgg, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
               RowsFinalize<kOutlierAgg, kOutlierMethods, double>, unsupervised);
     auto fit_transform = unsupervised;
-    fit_transform.push_back({{LogicalType::VARCHAR, LogicalType::DOUBLE, features}, FitUpdate<true>});
+    fit_transform.push_back({{LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE), features}, FitUpdate<true>});
     fit_transform.push_back(
-        {{LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR}, FitUpdate<true>});
+        {{LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE), features, LogicalType(LogicalTypeId::VARCHAR)}, FitUpdate<true>});
     fit_transform.push_back(
-        {{LogicalType::VARCHAR, LogicalType::DOUBLE, features, LogicalType::VARCHAR, LogicalType::DOUBLE},
+        {{LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE), features, LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::DOUBLE)},
          FitUpdate<true, true>});
-    make_rows("ml_fit_transform_agg", LogicalType::LIST(LogicalType::LIST(LogicalType::DOUBLE)),
+    make_rows("ml_fit_transform_agg", LogicalType::LIST(LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))),
               FitTransformFinalize, fit_transform);
 }
 

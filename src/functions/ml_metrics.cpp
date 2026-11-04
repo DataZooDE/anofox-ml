@@ -302,9 +302,9 @@ void MetricFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &resu
 } // anonymous namespace
 
 void RegisterMlMetrics(ExtensionLoader &loader) {
-    const auto D = LogicalType::DOUBLE;
-    const auto L = LogicalType::LIST(LogicalType::DOUBLE);
-    const auto V = LogicalType::VARCHAR;
+    const auto D = LogicalType(LogicalTypeId::DOUBLE);
+    const auto L = LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE));
+    const auto V = LogicalType(LogicalTypeId::VARCHAR);
 
 
     // Metrics differ only in name, argument shape and the optional arguments
@@ -357,7 +357,7 @@ void RegisterMlMetrics(ExtensionLoader &loader) {
     for (const auto &spec : specs) {
         AggregateFunctionSet set(spec.metric.function);
         auto add = [&](vector<LogicalType> args, aggregate_update_t update) {
-            AggregateFunction f(spec.metric.function, std::move(args), LogicalType::DOUBLE,
+            AggregateFunction f(spec.metric.function, std::move(args), LogicalType(LogicalTypeId::DOUBLE),
                                 AggregateFunction::StateSize<MetricState>, MetricInitialize, update, MetricCombine,
                                 MetricFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, MetricBind,
                                 MetricDestroy);

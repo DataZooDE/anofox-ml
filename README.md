@@ -61,6 +61,13 @@ cargo test                  # Rust FFI tests
 
 Requires a C++17 compiler, CMake ≥ 3.20 and a Rust toolchain.
 
+## License
+
+Business Source License 1.1 (see [LICENSE](LICENSE)), like the other
+DataZoo DuckDB extensions. The bundled
+[anofox-ml](https://github.com/sipemu/anofox-ml) library is licensed under
+MIT OR Apache-2.0.
+
 ## Telemetry
 
 This extension collects anonymous usage telemetry to help improve the product. Telemetry is **enabled by default** and includes:

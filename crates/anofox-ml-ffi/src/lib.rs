@@ -15,6 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::ffi::{c_char, CStr, CString};
 use std::hash::{Hash, Hasher};
 
+mod conformal;
 mod cv;
 mod metrics;
 
@@ -39,6 +40,9 @@ struct Meta {
     /// model sees label `i` (sorted order) as the class `i`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     labels: Option<Vec<String>>,
+    /// Calibration scores of a conformalized model (see [`conformal`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conformity: Option<conformal::Conformity>,
 }
 
 /// Cached decoded model: (BLOB hash, BLOB length, metadata, model).
@@ -315,6 +319,7 @@ fn fit_impl(
         n_features: x.ncols(),
         classes,
         labels,
+        conformity: None,
     };
     Ok(encode(&meta, &bytes))
 }
@@ -1296,6 +1301,7 @@ mod tests {
             n_features: 1,
             classes: None,
             labels: None,
+            conformity: None,
         };
         assert_eq!(label_of(&meta, 1.0).unwrap(), "1");
         assert_eq!(label_of(&meta, -2.5).unwrap(), "-2.5");

@@ -515,6 +515,241 @@ void MlPredictLabelFunction(DataChunk &args, ExpressionState &state, Vector &res
 }
 
 //===--------------------------------------------------------------------===//
+// ml_predict_interval(model BLOB, x DOUBLE[], alpha DOUBLE) -> STRUCT(lower, upper)
+// ml_predict_set(model BLOB, x DOUBLE[], alpha DOUBLE) -> VARCHAR[]
+// Conformal predictions of a model calibrated with ml_conformalize_agg.
+//===--------------------------------------------------------------------===//
+
+// Run `call(rows, alpha)` on the rows of one model batch, split into runs of
+// equal alpha; rows with a NULL alpha become NULL.
+template <class CALL>
+void ByAlpha(DataChunk &args, Vector &result, std::vector<idx_t> &rows, std::vector<double> &x, idx_t n_cols,
+             CALL &&call) {
+    UnifiedVectorFormat alpha_data;
+    args.data[2].ToUnifiedFormat(args.size(), alpha_data);
+    auto alphas = UnifiedVectorFormat::GetData<double>(alpha_data);
+    std::vector<idx_t> run_rows;
+    std::vector<double> run_x;
+    double run_alpha = 0;
+    auto flush = [&]() {
+        if (!run_rows.empty()) {
+            call(run_rows, run_x, run_alpha);
+        }
+        run_rows.clear();
+        run_x.clear();
+    };
+    for (idx_t r = 0; r < rows.size(); r++) {
+        auto ai = alpha_data.sel->get_index(rows[r]);
+        if (!alpha_data.validity.RowIsValid(ai)) {
+            FlatVector::SetNull(result, rows[r], true);
+            continue;
+        }
+        if (!run_rows.empty() && alphas[ai] != run_alpha) {
+            flush();
+        }
+        run_alpha = alphas[ai];
+        run_rows.push_back(rows[r]);
+        run_x.insert(run_x.end(), x.begin() + r * n_cols, x.begin() + (r + 1) * n_cols);
+    }
+    flush();
+}
+
+LogicalType IntervalType() {
+    child_list_t<LogicalType> fields;
+    fields.emplace_back("lower", LogicalType::DOUBLE);
+    fields.emplace_back("upper", LogicalType::DOUBLE);
+    return LogicalType::STRUCT(std::move(fields));
+}
+
+void MlPredictIntervalFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &fields = StructVector::GetEntries(result);
+    auto lower = FlatVector::GetData<double>(*fields[0]);
+    auto upper = FlatVector::GetData<double>(*fields[1]);
+    ApplyBatchedWith(
+        args, "ml_predict_interval", result,
+        [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+            ByAlpha(args, result, rows, x, n_cols, [&](std::vector<idx_t> &run, std::vector<double> &rx, double alpha) {
+                AnofoxMlDoubles out {nullptr, 0};
+                Check(anofox_ml_predict_interval(reinterpret_cast<const uint8_t *>(model.GetData()), model.GetSize(),
+                                                 rx.data(), run.size(), n_cols, alpha, &out),
+                      "ml_predict_interval");
+                for (idx_t r = 0; r < run.size(); r++) {
+                    lower[run[r]] = out.data[2 * r];
+                    upper[run[r]] = out.data[2 * r + 1];
+                }
+                anofox_ml_free_doubles(out);
+            });
+        });
+}
+
+void MlPredictSetFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    // Collect per row first: the list child vector is appended to in row order.
+    std::vector<std::pair<idx_t, std::vector<std::string>>> sets;
+    ApplyBatchedWith(
+        args, "ml_predict_set", result,
+        [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+            ByAlpha(args, result, rows, x, n_cols, [&](std::vector<idx_t> &run, std::vector<double> &rx, double alpha) {
+                AnofoxMlStrings members {nullptr, 0};
+                AnofoxMlDoubles lengths {nullptr, 0};
+                Check(anofox_ml_predict_set(reinterpret_cast<const uint8_t *>(model.GetData()), model.GetSize(),
+                                            rx.data(), run.size(), n_cols, alpha, &members, &lengths),
+                      "ml_predict_set");
+                size_t next = 0;
+                for (idx_t r = 0; r < run.size(); r++) {
+                    std::vector<std::string> set;
+                    for (size_t j = 0; j < static_cast<size_t>(lengths.data[r]); j++) {
+                        set.emplace_back(members.data[next++]);
+                    }
+                    sets.emplace_back(run[r], std::move(set));
+                }
+                anofox_ml_free_strings(members);
+                anofox_ml_free_doubles(lengths);
+            });
+        });
+    auto entries = FlatVector::GetData<list_entry_t>(result);
+    idx_t offset = ListVector::GetListSize(result);
+    for (auto &row : sets) {
+        entries[row.first] = list_entry_t(offset, row.second.size());
+        for (auto &m : row.second) {
+            ListVector::PushBack(result, Value(m));
+        }
+        offset += row.second.size();
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_conformalize_agg(model BLOB, y DOUBLE | VARCHAR, x DOUBLE[]) -> BLOB
+// Calibrates a fitted model on held-out rows (split conformal).
+//===--------------------------------------------------------------------===//
+struct ConformalState {
+    std::string *model;
+    std::vector<double> *x;
+    std::vector<double> *y;
+    std::vector<std::string> *labels;
+    idx_t n_rows;
+    idx_t n_cols;
+};
+
+void ConformalInitialize(const AggregateFunction &, data_ptr_t state_p) {
+    auto &s = *reinterpret_cast<ConformalState *>(state_p);
+    s.model = new std::string();
+    s.x = new std::vector<double>();
+    s.y = new std::vector<double>();
+    s.labels = new std::vector<std::string>();
+    s.n_rows = 0;
+    s.n_cols = 0;
+}
+
+void ConformalDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
+    auto states = FlatVector::GetData<ConformalState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        delete states[i]->model;
+        delete states[i]->x;
+        delete states[i]->y;
+        delete states[i]->labels;
+    }
+}
+
+template <bool LABELS>
+void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &state_vector, idx_t count) {
+    UnifiedVectorFormat model_data, y_data, x_data, sdata;
+    inputs[0].ToUnifiedFormat(count, model_data);
+    inputs[1].ToUnifiedFormat(count, y_data);
+    inputs[2].ToUnifiedFormat(count, x_data);
+    state_vector.ToUnifiedFormat(count, sdata);
+    auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
+    auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
+    auto &child = ListVector::GetEntry(inputs[2]);
+    UnifiedVectorFormat child_data;
+    child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), child_data);
+    auto values = UnifiedVectorFormat::GetData<double>(child_data);
+    auto states = reinterpret_cast<ConformalState **>(sdata.data);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[sdata.sel->get_index(i)];
+        auto mi = model_data.sel->get_index(i);
+        auto yi = y_data.sel->get_index(i);
+        auto xi = x_data.sel->get_index(i);
+        if (!model_data.validity.RowIsValid(mi) || !y_data.validity.RowIsValid(yi) ||
+            !x_data.validity.RowIsValid(xi) || HasNullElement(child_data, lists[xi])) {
+            continue;
+        }
+        const auto &entry = lists[xi];
+        if (s.n_rows == 0) {
+            *s.model = models[mi].GetString();
+            s.n_cols = entry.length;
+        } else if (models[mi].GetSize() != s.model->size() ||
+                   memcmp(models[mi].GetData(), s.model->data(), s.model->size()) != 0) {
+            throw InvalidInputException("ml_conformalize_agg: every row of a group must carry the same model");
+        } else if (entry.length != s.n_cols) {
+            throw InvalidInputException("ml_conformalize_agg: feature lists of different lengths");
+        }
+        for (idx_t j = 0; j < entry.length; j++) {
+            s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
+        }
+        if (LABELS) {
+            s.labels->push_back(UnifiedVectorFormat::GetData<string_t>(y_data)[yi].GetString());
+        } else {
+            s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
+        }
+        s.n_rows++;
+    }
+}
+
+void ConformalCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &, idx_t count) {
+    auto sources = FlatVector::GetData<ConformalState *>(source_vector);
+    auto targets = FlatVector::GetData<ConformalState *>(target_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &src = *sources[i];
+        auto &tgt = *targets[i];
+        if (src.n_rows == 0) {
+            continue;
+        }
+        if (tgt.n_rows == 0) {
+            *tgt.model = *src.model;
+            tgt.n_cols = src.n_cols;
+        } else if (*tgt.model != *src.model) {
+            throw InvalidInputException("ml_conformalize_agg: every row of a group must carry the same model");
+        } else if (tgt.n_cols != src.n_cols) {
+            throw InvalidInputException("ml_conformalize_agg: feature lists of different lengths");
+        }
+        tgt.x->insert(tgt.x->end(), src.x->begin(), src.x->end());
+        tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
+        tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
+        tgt.n_rows += src.n_rows;
+    }
+}
+
+void ConformalFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<ConformalState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_conformalize_agg");
+        AnofoxMlBytes blob {nullptr, 0};
+        auto model = reinterpret_cast<const uint8_t *>(s.model->data());
+        if (!s.labels->empty()) {
+            std::vector<const char *> labels;
+            for (const auto &l : *s.labels) {
+                labels.push_back(l.c_str());
+            }
+            Check(anofox_ml_conformalize_labels(model, s.model->size(), s.x->data(), s.n_rows, s.n_cols,
+                                                labels.data(), &blob),
+                  "ml_conformalize_agg");
+        } else {
+            Check(anofox_ml_conformalize(model, s.model->size(), s.x->data(), s.n_rows, s.n_cols, s.y->data(), &blob),
+                  "ml_conformalize_agg");
+        }
+        FlatVector::GetData<string_t>(result)[row] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
+        anofox_ml_free_bytes(blob);
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_predict(model BLOB, x DOUBLE[]) -> DOUBLE
 //===--------------------------------------------------------------------===//
 void MlPredictFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -651,6 +886,24 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(ScalarFunction("ml_predict", model_and_x, LogicalType::DOUBLE, MlPredictFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_predict_label", model_and_x, LogicalType::VARCHAR, MlPredictLabelFunction));
+    const vector<LogicalType> model_x_alpha {LogicalType::BLOB, LogicalType::LIST(LogicalType::DOUBLE),
+                                             LogicalType::DOUBLE};
+    loader.RegisterFunction(
+        ScalarFunction("ml_predict_interval", model_x_alpha, IntervalType(), MlPredictIntervalFunction));
+    loader.RegisterFunction(ScalarFunction("ml_predict_set", model_x_alpha, LogicalType::LIST(LogicalType::VARCHAR),
+                                           MlPredictSetFunction));
+    AggregateFunctionSet conformal_set("ml_conformalize_agg");
+    for (bool labels : {false, true}) {
+        AggregateFunction f("ml_conformalize_agg",
+                            {LogicalType::BLOB, labels ? LogicalType::VARCHAR : LogicalType::DOUBLE,
+                             LogicalType::LIST(LogicalType::DOUBLE)},
+                            LogicalType::BLOB, AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
+                            labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine,
+                            ConformalFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
+                            ConformalDestroy);
+        conformal_set.AddFunction(f);
+    }
+    loader.RegisterFunction(conformal_set);
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
         {"ml_transform", "transform"},         {"ml_inverse_transform", "inverse_transform"},

@@ -15,7 +15,7 @@
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 104 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. Tuning, conformal prediction and the remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested. Tuning and the remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
 
 ## ✨ Key Features
@@ -190,6 +190,30 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
+### Conformal Prediction
+
+Split conformal prediction: calibrate a fitted model on held-out rows, then ask for prediction intervals (regressors) or prediction sets (classifiers) at any miscoverage `alpha`. Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.
+
+| Function | Description |
+|---|---|
+| `ml_conformalize_agg(model, y, [x1, x2, …])` | Aggregate over calibration rows: a copy of `model` with its conformity scores (absolute residuals for regressors, `1 − p(true class)` for classifiers). `y` may be `VARCHAR` for a model fitted on string labels |
+| `ml_predict_interval(model, [x1, x2, …], alpha)` | `STRUCT(lower, upper)` = prediction ± the conformal quantile of the residuals (infinite when there are too few calibration rows for `alpha`) |
+| `ml_predict_set(model, [x1, x2, …], alpha)` | `VARCHAR[]` of the classes whose score is within the conformal quantile |
+| `ml_conformal_margin(y, y_pred, alpha)` | Aggregate: the conformal quantile of `abs(y − y_pred)`, model-free |
+
+```sql
+CREATE TABLE model AS SELECT ml_fit_agg('HistGradientBoostingRegressor', y, [x1, x2]) AS m FROM train;
+CREATE TABLE calibrated AS SELECT ml_conformalize_agg(m, y, [x1, x2]) AS m FROM calibration, model GROUP BY ALL;
+
+SELECT ml_predict(m, [x1, x2]) AS forecast,
+       ml_predict_interval(m, [x1, x2], 0.1) AS pi90
+FROM test, calibrated;
+
+-- check it: coverage and interval score
+SELECT ml_coverage(y, pi90.lower, pi90.upper), ml_interval_score(y, pi90.lower, pi90.upper, 0.1)
+FROM (SELECT y, ml_predict_interval(m, [x1, x2], 0.1) AS pi90 FROM test, calibrated);
+```
+
 ### Table Macros
 
 One-shot workflows over a table (name as a string) and its columns. They keep every source column and add the result columns. Pass a constant such as `1` as `group_col` for a single model over the whole table. `id_col` must be unique within a group; it aligns per-row results and fixes the row order.
@@ -272,7 +296,7 @@ SELECT avg(rmse), stddev(rmse) FROM (
 | Purged and spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Sample weights and a memory guard for large groups | [#3](https://github.com/DataZooDE/anofox-ml/issues/3) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
-| Conformal prediction intervals | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
+| Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Parallelism within a single fit | [#7](https://github.com/DataZooDE/anofox-ml/issues/7) |
 | Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 

@@ -56,6 +56,7 @@ enum class Shape {
     PAIR,       // (y DOUBLE, pred DOUBLE | DOUBLE[] [, options VARCHAR [, weight DOUBLE]])
     SILHOUETTE, // (x DOUBLE[], label DOUBLE)
     INTERVAL,   // (y DOUBLE, lower DOUBLE, upper DOUBLE [, alpha DOUBLE])
+    ALPHA,      // (y DOUBLE, pred DOUBLE, alpha DOUBLE)
 };
 
 struct Metric {
@@ -131,6 +132,12 @@ void MetricUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vect
                     *s.options =
                         StringUtil::Format("{\"alpha\": %.17g}", UnifiedVectorFormat::GetData<double>(d)[di]);
                 }
+            }
+        }
+        if (SHAPE == Shape::ALPHA && s.options->empty()) {
+            auto ci = c.sel->get_index(i);
+            if (c.validity.RowIsValid(ci)) {
+                *s.options = StringUtil::Format("{\"alpha\": %.17g}", UnifiedVectorFormat::GetData<double>(c)[ci]);
             }
         }
         double weight = 1.0;
@@ -343,6 +350,8 @@ void RegisterMlMetrics(ExtensionLoader &loader) {
         // prediction intervals
         {{"ml_coverage", "coverage"}, Shape::INTERVAL, false, false, false, false, false},
         {{"ml_interval_score", "interval_score"}, Shape::INTERVAL, false, false, false, false, false},
+        // conformal: quantile of |y - y_pred|
+        {{"ml_conformal_margin", "conformal_margin"}, Shape::ALPHA, false, false, false, false, false},
     };
 
     for (const auto &spec : specs) {
@@ -384,6 +393,9 @@ void RegisterMlMetrics(ExtensionLoader &loader) {
             break;
         case Shape::SILHOUETTE:
             add({L, D}, MetricUpdate<Shape::SILHOUETTE, false>);
+            break;
+        case Shape::ALPHA:
+            add({D, D, D}, MetricUpdate<Shape::ALPHA, false>);
             break;
         case Shape::INTERVAL:
             add({D, D, D}, MetricUpdate<Shape::INTERVAL, false>);

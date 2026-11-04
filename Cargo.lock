@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "anofox-ml-cluster"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-manifold",
@@ -19,9 +19,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "anofox-ml-conformal"
+version = "0.2.0"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
+dependencies = [
+ "anofox-ml-core",
+ "ndarray",
+ "rand 0.8.8",
+]
+
+[[package]]
 name = "anofox-ml-core"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "bincode",
  "ndarray",
@@ -38,7 +48,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-discriminant"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "faer",
@@ -50,7 +60,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-ensemble"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-trees",
@@ -64,7 +74,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-gaussian-process"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "faer",
@@ -77,7 +87,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-linear"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "anofox-regression",
@@ -91,7 +101,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-manifold"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-neighbors",
@@ -105,7 +115,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-metrics"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -115,7 +125,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-naive-bayes"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -126,7 +136,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-neighbors"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -138,7 +148,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-neural-networks"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -150,7 +160,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-preprocessing"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-regression",
@@ -166,7 +176,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-registry"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-cluster",
  "anofox-ml-core",
@@ -190,7 +200,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-regression"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",
@@ -205,7 +215,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-svm"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -218,7 +228,7 @@ dependencies = [
 [[package]]
 name = "anofox-ml-trees"
 version = "0.2.0"
-source = "git+https://github.com/sipemu/anofox-ml?branch=master#07ca1ecb5b624df3e7c298f45e91b509c809ec91"
+source = "git+https://github.com/sipemu/anofox-ml?branch=master#7fd03c75b4b2f0060187a07a1b108f98fce1137c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -243,6 +253,7 @@ dependencies = [
 name = "anofox_ml_ffi"
 version = "0.1.0"
 dependencies = [
+ "anofox-ml-conformal",
  "anofox-ml-core",
  "anofox-ml-metrics",
  "anofox-ml-registry",

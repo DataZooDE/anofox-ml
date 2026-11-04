@@ -14,6 +14,7 @@ crate-type = ["staticlib"]
 anofox-ml-core = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
 anofox-ml-registry = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
 anofox-ml-metrics = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
+anofox-ml-conformal = { git = "https://github.com/sipemu/anofox-ml", branch = "master" }
 ndarray = "0.16"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

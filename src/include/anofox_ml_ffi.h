@@ -90,6 +90,19 @@ void anofox_ml_free_splits(AnofoxMlSplits s);
 char *anofox_ml_metric_labels(const char *name, const char *options, const char *const *y_true,
                               const char *const *y_pred, size_t n, const double *w, double *out);
 
+// Split conformal prediction: calibrate a model BLOB on held-out rows (y as
+// doubles, or string labels for a model fitted on labels); `out` receives the
+// calibrated BLOB. Intervals: n_rows x 2 doubles (lower, upper). Sets: the
+// members of each row's set one row after the other, and each set's size.
+char *anofox_ml_conformalize(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
+                             const double *y, AnofoxMlBytes *out);
+char *anofox_ml_conformalize_labels(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,
+                                    size_t n_cols, const char *const *y, AnofoxMlBytes *out);
+char *anofox_ml_predict_interval(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,
+                                 size_t n_cols, double alpha, AnofoxMlDoubles *out);
+char *anofox_ml_predict_set(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
+                            double alpha, AnofoxMlStrings *labels, AnofoxMlDoubles *lengths);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

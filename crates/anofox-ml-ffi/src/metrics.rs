@@ -100,6 +100,7 @@ pub(crate) const METRICS: &[&str] = &[
     "silhouette",
     "coverage",
     "interval_score",
+    "conformal_margin",
 ];
 
 pub(crate) fn metric(
@@ -229,6 +230,18 @@ pub(crate) fn metric(
                 let alpha = o.alpha.ok_or("interval_score needs alpha")?;
                 m::interval_score(&y_true, &lo, &hi, alpha)
             }
+        }
+        "conformal_margin" => {
+            need_cols(1)?;
+            no_weight(&w)?;
+            let alpha = o.alpha.ok_or("conformal_margin needs alpha")?;
+            let scores: Vec<f64> = y_true
+                .iter()
+                .zip(col(0).iter())
+                .map(|(t, p)| (t - p).abs())
+                .collect();
+            anofox_ml_conformal::conformal_quantile(&scores, alpha)
+                .map(|q| q.unwrap_or(f64::INFINITY))
         }
         _ => return Err(format!("unknown metric '{name}' (known: {METRICS:?})")),
     };

@@ -368,8 +368,6 @@ SELECT avg(rmse), stddev(rmse) FROM (
 
 | Topic | Issue |
 |---|---|
-| Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
-| Spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | TPE / Optuna-style tuning (rustuna) on top of `ml_tune_agg` | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |

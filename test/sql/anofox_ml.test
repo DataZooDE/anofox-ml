@@ -339,3 +339,30 @@ true	true	true
 
 statement ok
 RESET anofox_ml_threads;
+
+# Fitted arrays.
+query II
+SELECT round(c.coef[1][1], 9), round(c.intercept[1], 9)
+FROM (SELECT ml_coefficients(ml_fit_agg('OlsRegressor', 2 * i + 1, [i::DOUBLE])) AS c FROM range(50) t(i));
+----
+2.0	1.0
+
+query II
+SELECT len(c.coef), len(c.intercept) FROM (SELECT ml_coefficients(ml_fit_agg('LogisticRegressor', (i % 3)::DOUBLE, [i::DOUBLE, (i % 5)::DOUBLE])) AS c FROM range(60) t(i));
+----
+3	3
+
+query I
+SELECT list_sort(ml_cluster_centers(ml_fit_agg('KMeans', [(i % 2) * 10.0], '{"n_clusters": 2}'))) FROM range(20) t(i);
+----
+[[0.0], [10.0]]
+
+query I
+SELECT abs(list_sum(ml_explained_variance_ratio(ml_fit_agg('Pca', [i::DOUBLE, (i % 3)::DOUBLE]))) - 1) < 1e-9 FROM range(20) t(i);
+----
+true
+
+statement error
+SELECT ml_coefficients(ml_fit_agg('DecisionTreeRegressor', i::DOUBLE, [i::DOUBLE])) FROM range(10) t(i);
+----
+has no coef / weights

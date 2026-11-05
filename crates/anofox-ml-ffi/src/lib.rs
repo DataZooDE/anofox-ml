@@ -818,6 +818,94 @@ pub unsafe extern "C" fn anofox_ml_model_fitted(
     }
 }
 
+/// The first fitted array found under one of `keys` (tried in order, each
+/// over the whole fitted state, depth first): `(rows, cols, data)`. ndarray
+/// values (`{"v", "dim", "data"}`), plain number lists and scalars count.
+fn fitted_array(json: &serde_json::Value, keys: &[&str]) -> Option<(usize, usize, Vec<f64>)> {
+    fn as_array(v: &serde_json::Value) -> Option<(usize, usize, Vec<f64>)> {
+        match v {
+            serde_json::Value::Number(n) => Some((1, 1, vec![n.as_f64()?])),
+            serde_json::Value::Array(a) => {
+                let d: Option<Vec<f64>> = a.iter().map(serde_json::Value::as_f64).collect();
+                d.map(|d| (1, d.len(), d))
+            }
+            serde_json::Value::Object(o) => {
+                let dim: Vec<usize> = o
+                    .get("dim")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|d| d.as_u64())
+                    .map(|d| d as usize)
+                    .collect();
+                let data: Vec<f64> = o
+                    .get("data")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(serde_json::Value::as_f64)
+                    .collect();
+                match dim.as_slice() {
+                    [n] => Some((1, *n, data)),
+                    [r, c] => Some((*r, *c, data)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    fn find<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        match v {
+            serde_json::Value::Object(o) => {
+                o.get(key).or_else(|| o.values().find_map(|c| find(c, key)))
+            }
+            serde_json::Value::Array(a) => a.iter().find_map(|c| find(c, key)),
+            _ => None,
+        }
+    }
+    keys.iter().find_map(|k| find(json, k).and_then(as_array))
+}
+
+/// A fitted array of a model BLOB under the first of the comma-separated
+/// `keys` it has (see [`fitted_array`]); `out` receives `rows * cols`
+/// doubles, row-major.
+///
+/// # Safety
+/// `model` holds `model_len` bytes, `keys` is NUL-terminated; the outputs
+/// are writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_model_array(
+    model: *const u8,
+    model_len: usize,
+    keys: *const c_char,
+    out: *mut AnofoxMlDoubles,
+    rows: *mut usize,
+    cols: *mut usize,
+) -> *mut c_char {
+    let run = || -> Result<(usize, usize, Vec<f64>), String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let keys: Vec<&str> = str_arg(keys, "keys")?.split(',').collect();
+        let blob = std::slice::from_raw_parts(model, model_len);
+        with_model(blob, |meta, model| {
+            let json: serde_json::Value =
+                serde_json::from_str(&model.fitted_json().map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+            fitted_array(&json, &keys)
+                .ok_or_else(|| format!("{} has no {}", meta.kind, keys.join(" / ")))
+        })
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok((r, c, v))) => {
+            *out = into_doubles(v);
+            *rows = r;
+            *cols = c;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while reading the model"),
+    }
+}
+
 fn cstring(s: impl Into<Vec<u8>>) -> *mut c_char {
     CString::new(s).map_or(std::ptr::null_mut(), CString::into_raw)
 }

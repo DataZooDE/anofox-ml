@@ -196,6 +196,9 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_estimate_bandwidth_agg([x1, x2, …] [, options])` | Aggregate: a MeanShift bandwidth (scikit-learn `estimate_bandwidth`); options `quantile` (0.3), `n_samples`, `seed` |
 | `ml_multiple_impute_agg(id, [x1, x2, …] [, options] ORDER BY id)` | Aggregate: multiple imputation as Hmisc's `aregImpute` (additive regression + predictive mean matching). A NULL element is a missing value; returns `STRUCT(imputation, id, x DOUBLE[])[]`, `n_impute` completed copies of the rows. Options: `n_impute` (5), `nk` (3), `tlinear`, `burnin`, `match` (`"weighted"` / `"closest"`), `fweighted`, `kinds` (per column `"numeric"` / `"linear"` / `"categorical"`), `seed` (1, as R's `set.seed(1)`) |
 | `ml_model_fitted(model)` | The fitted state as JSON: coefficients, centroids, components, trees, … (arrays as `{"v", "dim", "data"}`, e.g. `json_extract(ml_model_fitted(m), '$.coef.data')`) |
+| `ml_coefficients(model)` | `STRUCT(coef DOUBLE[][], intercept DOUBLE[])` of a linear model (one `coef` row per class for multiclass models) |
+| `ml_cluster_centers(model)` | `DOUBLE[][]`: centroids / cluster centres / mixture means |
+| `ml_explained_variance_ratio(model)` | `DOUBLE[]` of PCA-like decompositions |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 

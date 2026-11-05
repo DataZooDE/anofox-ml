@@ -160,6 +160,11 @@ void anofox_ml_free_tune_result(AnofoxMlTuneResult r);
 char *anofox_ml_model_array(const uint8_t *model, size_t model_len, const char *keys, AnofoxMlDoubles *out,
                             size_t *rows, size_t *cols);
 
+// Spectral embedding of a graph of n nodes from m weighted edges (both
+// directions added): out receives n x out_cols doubles.
+char *anofox_ml_spectral_embedding(const char *options, size_t n, const uint64_t *src, const uint64_t *dst,
+                                   const double *w, size_t m, AnofoxMlDoubles *out, size_t *out_cols);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

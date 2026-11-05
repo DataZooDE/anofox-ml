@@ -239,7 +239,7 @@ SELECT ml_predict_label(model, ml_hashing_vectorize(body, 1024, '{"alternate_sig
 `ml_tune_agg(kind, y, [x1, x2, …], search_space [, options])` searches hyperparameters by k-fold cross-validation and returns `STRUCT(best_params, best_score, model, trials)`. `model` is the best candidate refitted on all rows, ready for `ml_predict`, and `trials` is a JSON array of every candidate's mean / std score (or its error). Per `GROUP BY` group, one search each.
 
 - **Search space** (JSON object, one entry per parameter): a list of values (grid / categorical), `{"int": [lo, hi]}`, `{"float": [lo, hi]}` (both with optional `"log": true`) or `{"categorical": […]}`.
-- **Options:** `search` (`"random"` default, or `"grid"`), `n_trials` (20), `cv` (5 folds; stratified for classifiers unless `"stratify": false`), `metric` (any metric aggregate name; default `accuracy` / `r2`; losses are minimised), `metric_options`, `params` (fixed for every candidate), `seed`.
+- **Options:** `search` (`"random"` default, `"grid"`, or successive halving `"halving"` / `"halving_grid"`: all candidates on a small seeded subsample, the best `1/factor` (default 3) kept and the rows grown by `factor` each round), `n_trials` (20), `cv` (5 folds; stratified for classifiers unless `"stratify": false`), `metric` (any metric aggregate name; default `accuracy` / `r2`; losses are minimised), `metric_options`, `params` (fixed for every candidate), `seed`.
 
 Candidates are drawn from `seed` up front and every candidate × fold is scored in parallel, so the result is the same whatever the thread count.
 

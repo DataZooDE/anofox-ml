@@ -73,3 +73,15 @@ statement error
 SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": [1]}', '{"folds": 3}') FROM d;
 ----
 unknown field
+
+# successive halving: 9 candidates on n/9 rows, the best 3 on n/3, the best on all rows
+query III
+SELECT t.trials LIKE '%"round":2%', t.trials NOT LIKE '%"round":3%', ml_predict(t.model, [7.0]) > 9
+FROM (SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": [0, 1, 2, 3, 4, 5, 6, 7, 8]}', '{"search": "halving_grid", "cv": 3}') AS t FROM d);
+----
+true	true	true
+
+query I
+SELECT (ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": {"int": [1, 8]}}', '{"search": "halving", "n_trials": 9, "metric": "rmse"}')).best_score < 1 FROM d;
+----
+true

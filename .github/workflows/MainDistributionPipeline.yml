@@ -35,7 +35,7 @@ jobs:
       matrix:
         duckdb_arch: [wasm_mvp, wasm_eh, wasm_threads]
     env:
-      VCPKG_TARGET_TRIPLET: ${{ matrix.duckdb_arch }}
+      VCPKG_TARGET_TRIPLET: wasm32-emscripten
       VCPKG_HOST_TRIPLET: x64-linux
       VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/extension-ci-tools/vcpkg_ports
       VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/extension-ci-tools/toolchains

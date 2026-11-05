@@ -139,6 +139,11 @@ char *anofox_ml_encode(const uint8_t *model, size_t model_len, const char *const
 char *anofox_ml_stat(const char *name, const char *options, const double *x, size_t n, size_t d, const double *y,
                      const char *const *y_labels, AnofoxMlDoubles *out);
 
+// A fitted array (first of the comma-separated keys found in the fitted
+// state): rows x cols doubles, row-major.
+char *anofox_ml_model_array(const uint8_t *model, size_t model_len, const char *keys, AnofoxMlDoubles *out,
+                            size_t *rows, size_t *cols);
+
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'

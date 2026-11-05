@@ -1057,6 +1057,104 @@ void MlModelFittedFunction(DataChunk &args, ExpressionState &state, Vector &resu
 }
 
 //===--------------------------------------------------------------------===//
+// Fitted arrays: ml_coefficients(model) -> STRUCT(coef DOUBLE[][], intercept DOUBLE[]),
+// ml_cluster_centers(model) -> DOUBLE[][], ml_explained_variance_ratio(model) -> DOUBLE[]
+//===--------------------------------------------------------------------===//
+// Read a fitted array; false when `optional` and the model has none.
+bool ModelArray(const char *function, string_t blob, const char *keys, bool optional, std::vector<double> &data,
+                size_t &rows, size_t &cols) {
+    AnofoxMlDoubles out {nullptr, 0};
+    char *err = anofox_ml_model_array(reinterpret_cast<const uint8_t *>(blob.GetData()), blob.GetSize(), keys, &out,
+                                      &rows, &cols);
+    if (err) {
+        if (optional) {
+            anofox_ml_free_string(err);
+            return false;
+        }
+        Check(err, function);
+    }
+    data.assign(out.data, out.data + out.len);
+    anofox_ml_free_doubles(out);
+    return true;
+}
+
+Value MatrixValue(const std::vector<double> &data, size_t rows, size_t cols) {
+    const auto D = LogicalType(LogicalTypeId::DOUBLE);
+    vector<Value> out;
+    for (size_t r = 0; r < rows; r++) {
+        vector<Value> row;
+        for (size_t c = 0; c < cols; c++) {
+            row.push_back(Value::DOUBLE(data[r * cols + c]));
+        }
+        out.push_back(Value::LIST(D, std::move(row)));
+    }
+    return Value::LIST(LogicalType::LIST(D), std::move(out));
+}
+
+Value ListValue(const std::vector<double> &data) {
+    vector<Value> out;
+    for (double d : data) {
+        out.push_back(Value::DOUBLE(d));
+    }
+    return Value::LIST(LogicalType(LogicalTypeId::DOUBLE), std::move(out));
+}
+
+template <class MAKE>
+void ModelValueFunction(DataChunk &args, Vector &result, MAKE &&make) {
+    UnifiedVectorFormat model_data;
+    args.data[0].ToUnifiedFormat(args.size(), model_data);
+    auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto mi = model_data.sel->get_index(i);
+        result.SetValue(i, model_data.validity.RowIsValid(mi) ? make(models[mi]) : Value(result.GetType()));
+    }
+    if (args.AllConstant()) {
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+    }
+}
+
+LogicalType CoefficientsType() {
+    const auto D = LogicalType(LogicalTypeId::DOUBLE);
+    child_list_t<LogicalType> fields;
+    fields.emplace_back("coef", LogicalType::LIST(LogicalType::LIST(D)));
+    fields.emplace_back("intercept", LogicalType::LIST(D));
+    return LogicalType::STRUCT(std::move(fields));
+}
+
+void MlCoefficientsFunction(DataChunk &args, ExpressionState &, Vector &result) {
+    ModelValueFunction(args, result, [](string_t blob) {
+        std::vector<double> coef, intercept;
+        size_t r = 0, c = 0, ir = 0, ic = 0;
+        ModelArray("ml_coefficients", blob, "coef,weights", false, coef, r, c);
+        bool has_intercept =
+            ModelArray("ml_coefficients", blob, "intercept,intercepts,bias,biases", true, intercept, ir, ic);
+        child_list_t<Value> fields;
+        fields.emplace_back("coef", MatrixValue(coef, r, c));
+        fields.emplace_back("intercept", has_intercept ? ListValue(intercept)
+                                                       : Value(LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))));
+        return Value::STRUCT(std::move(fields));
+    });
+}
+
+void MlClusterCentersFunction(DataChunk &args, ExpressionState &, Vector &result) {
+    ModelValueFunction(args, result, [](string_t blob) {
+        std::vector<double> data;
+        size_t r = 0, c = 0;
+        ModelArray("ml_cluster_centers", blob, "centroids,cluster_centers,subcluster_centers,means", false, data, r, c);
+        return MatrixValue(data, r, c);
+    });
+}
+
+void MlExplainedVarianceRatioFunction(DataChunk &args, ExpressionState &, Vector &result) {
+    ModelValueFunction(args, result, [](string_t blob) {
+        std::vector<double> data;
+        size_t r = 0, c = 0;
+        ModelArray("ml_explained_variance_ratio", blob, "explained_variance_ratio", false, data, r, c);
+        return ListValue(data);
+    });
+}
+
+//===--------------------------------------------------------------------===//
 // ml_model_info(model BLOB) -> STRUCT(kind, n_features, classes, capabilities,
 //                                     params, format_version, crate_version)
 //===--------------------------------------------------------------------===//
@@ -1135,6 +1233,12 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         ScalarFunction("ml_model_kind", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelKindFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_model_info", {LogicalType(LogicalTypeId::BLOB)}, ModelInfoType(), MlModelInfoFunction));
+    const auto BL = LogicalType(LogicalTypeId::BLOB), DL = LogicalType(LogicalTypeId::DOUBLE);
+    loader.RegisterFunction(ScalarFunction("ml_coefficients", {BL}, CoefficientsType(), MlCoefficientsFunction));
+    loader.RegisterFunction(ScalarFunction("ml_cluster_centers", {BL}, LogicalType::LIST(LogicalType::LIST(DL)),
+                                           MlClusterCentersFunction));
+    loader.RegisterFunction(ScalarFunction("ml_explained_variance_ratio", {BL}, LogicalType::LIST(DL),
+                                           MlExplainedVarianceRatioFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_model_fitted", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelFittedFunction));
     const vector<LogicalType> model_and_x {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};

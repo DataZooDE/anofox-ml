@@ -195,6 +195,9 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_covariance_agg([x1, x2, …] [, options])` | Aggregate: `STRUCT(covariance DOUBLE[][], shrinkage)`; `method` = `"ledoit_wolf"` (default), `"oas"` or `"empirical"`, as scikit-learn |
 | `ml_estimate_bandwidth_agg([x1, x2, …] [, options])` | Aggregate: a MeanShift bandwidth (scikit-learn `estimate_bandwidth`); options `quantile` (0.3), `n_samples`, `seed` |
 | `ml_model_fitted(model)` | The fitted state as JSON: coefficients, centroids, components, trees, … (arrays as `{"v", "dim", "data"}`, e.g. `json_extract(ml_model_fitted(m), '$.coef.data')`) |
+| `ml_coefficients(model)` | `STRUCT(coef DOUBLE[][], intercept DOUBLE[])` of a linear model (one `coef` row per class for multiclass models) |
+| `ml_cluster_centers(model)` | `DOUBLE[][]`: centroids / cluster centres / mixture means |
+| `ml_explained_variance_ratio(model)` | `DOUBLE[]` of PCA-like decompositions |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 

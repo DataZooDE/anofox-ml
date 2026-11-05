@@ -166,6 +166,11 @@ FROM points;
 SELECT unnest(ml_permutation_importance_agg(model, y, [x1, x2, x3], '{"n_repeats": 10}'), recursive := true)
 FROM test, models GROUP BY model;
 
+-- partial dependence of the prediction on x1: average prediction over the data with x1 set to each grid value
+SELECT g AS x1, avg(ml_predict(model, [g, x2, x3])) AS partial_dependence
+FROM test, models, (SELECT unnest(range(0, 101, 10))::DOUBLE AS g) grid
+GROUP BY g ORDER BY g;
+
 -- sample weights and the fitted state
 SELECT ml_model_fitted(ml_fit_agg('OlsRegressor', y, [x1, x2], '{}', weight)) FROM train;
 
@@ -183,6 +188,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
 | `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
+| `ml_predict_log_proba(model, [x1, x2, …])` | `ln` of the class probabilities (`DOUBLE[]`) |
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
 | `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`); `ml_transform(encoder, [VARCHAR, …])` for the categorical encoders |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |

@@ -181,6 +181,75 @@ pub unsafe extern "C" fn anofox_ml_stat(
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct EmbeddingOptions {
+    n_components: Option<usize>,
+    /// Drop the first (constant) eigenvector, default true.
+    drop_first: Option<bool>,
+}
+
+/// Spectral embedding of a graph of `n` nodes from `m` weighted edges
+/// (`src[e] -> dst[e]`, added in both directions); `out` receives
+/// `n × out_cols` doubles, row-major (node order as the indices).
+///
+/// # Safety
+/// `options` is NUL-terminated or NULL; `src` / `dst` / `w` hold `m`
+/// values; `out` / `out_cols` are writable.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn anofox_ml_spectral_embedding(
+    options: *const c_char,
+    n: usize,
+    src: *const u64,
+    dst: *const u64,
+    w: *const f64,
+    m: usize,
+    out: *mut AnofoxMlDoubles,
+    out_cols: *mut usize,
+) -> *mut c_char {
+    let run = || -> Result<(Vec<f64>, usize), String> {
+        let options = if options.is_null() {
+            ""
+        } else {
+            str_arg(options, "options")?
+        };
+        let o: EmbeddingOptions = parse(options)?;
+        if m == 0 || src.is_null() || dst.is_null() || w.is_null() {
+            return Err("no edges".into());
+        }
+        let (s, d, w) = (
+            std::slice::from_raw_parts(src, m),
+            std::slice::from_raw_parts(dst, m),
+            std::slice::from_raw_parts(w, m),
+        );
+        let mut edges = Vec::with_capacity(2 * m);
+        for e in 0..m {
+            let (i, j) = (s[e] as usize, d[e] as usize);
+            if i >= n || j >= n {
+                return Err("edge outside the node range".into());
+            }
+            edges.push((i, j, w[e]));
+            edges.push((j, i, w[e]));
+        }
+        let k = o.n_components.unwrap_or(2);
+        let emb =
+            anofox_ml_manifold::spectral_embedding(n, &edges, k, o.drop_first.unwrap_or(true))
+                .map_err(|e| e.to_string())?;
+        let cols = emb.ncols();
+        Ok((emb.as_standard_layout().iter().copied().collect(), cols))
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok((v, c))) => {
+            *out = into_doubles(v);
+            *out_cols = c;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while embedding"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

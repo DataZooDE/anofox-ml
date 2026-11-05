@@ -25,8 +25,12 @@ use crate::{
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    /// `"random"` (default) or `"grid"`.
+    /// `"random"` (default), `"grid"`, `"halving"` (successive halving of
+    /// random candidates) or `"halving_grid"`.
     search: Option<String>,
+    /// Halving: keep the best `1 / factor` of the candidates per round and
+    /// grow the rows by `factor` (default 3).
+    factor: Option<usize>,
     /// Candidates of a random search (default 20).
     n_trials: Option<usize>,
     /// Folds (default 5).
@@ -132,7 +136,7 @@ fn sample(dim: &Dim, rng: &mut StdRng) -> Value {
 /// Candidate parameter sets (without the fixed params).
 fn candidates(space: &[(String, Dim)], o: &Options) -> Result<Vec<Map<String, Value>>, String> {
     match o.search.as_deref().unwrap_or("random") {
-        "grid" => {
+        "grid" | "halving_grid" => {
             let mut out = vec![Map::new()];
             for (name, dim) in space {
                 let Dim::Choice(vals) = dim else {
@@ -151,7 +155,7 @@ fn candidates(space: &[(String, Dim)], o: &Options) -> Result<Vec<Map<String, Va
             }
             Ok(out)
         }
-        "random" => {
+        "random" | "halving" => {
             let mut rng = StdRng::seed_from_u64(o.seed.unwrap_or(0));
             Ok((0..o.n_trials.unwrap_or(20).max(1))
                 .map(|_| {
@@ -163,10 +167,13 @@ fn candidates(space: &[(String, Dim)], o: &Options) -> Result<Vec<Map<String, Va
                 .collect())
         }
         s => Err(format!(
-            "search must be \"random\" or \"grid\", got \"{s}\""
+            "search must be \"random\", \"grid\", \"halving\" or \"halving_grid\", got \"{s}\""
         )),
     }
 }
+
+/// Mean and std CV score of one candidate, or why it failed.
+type CandidateScore = Result<(f64, f64), String>;
 
 #[derive(Debug)]
 pub(crate) struct TuneResult {
@@ -206,12 +213,7 @@ pub(crate) fn tune(
     );
     let k = o.cv.unwrap_or(5);
     let seed = o.seed.unwrap_or(0);
-    let folds = if o.stratify.unwrap_or(classifier) {
-        ut::stratified_k_fold(x, y, k, seed)
-    } else {
-        ut::shuffled_k_fold(x.nrows(), k, seed)
-    }
-    .map_err(|e| e.to_string())?;
+    let stratify = o.stratify.unwrap_or(classifier);
     // Classes of the whole training set: the column order of probabilities
     // and the labels of log_loss, the same in every fold.
     let mut classes: Vec<f64> = y.to_vec();
@@ -236,81 +238,153 @@ pub(crate) fn tune(
 
     // Score one (candidate, fold); each fit runs sequentially inside the
     // parallel loop.
-    let score_fold =
-        |p: &Map<String, Value>, (train, test): &(Vec<usize>, Vec<usize>)| -> Result<f64, String> {
-            let (xtr, ytr) = (x.select(Axis(0), train), y.select(Axis(0), train));
-            let (xte, yte) = (x.select(Axis(0), test), y.select(Axis(0), test));
-            let params = Value::Object(p.clone()).to_string();
-            let m = fit_model(kind, &params, xtr.view(), Some(ytr.view()), None, 1)?;
-            let pred = if proba {
-                let out = m.predict_proba(xte.view()).map_err(|e| e.to_string())?;
-                let crate::Out::A2(p) = out else {
-                    return Err("predict_proba returned a vector".into());
-                };
-                // Align the fold model's classes with the full set (a fold may miss one).
-                let mut fold_classes: Vec<f64> = ytr.to_vec();
-                fold_classes.sort_by(f64::total_cmp);
-                fold_classes.dedup();
-                let mut full = Array2::<f64>::zeros((p.nrows(), classes.len()));
-                for (j, c) in fold_classes.iter().enumerate() {
-                    let col = classes
-                        .iter()
-                        .position(|v| v == c)
-                        .expect("fold class in the full set");
-                    full.column_mut(col).assign(&p.column(j));
-                }
-                if classes.len() == 2 && metric != "log_loss" {
-                    full.column(1).to_owned().insert_axis(Axis(1))
-                } else {
-                    full
-                }
-            } else {
-                let out = m.predict(xte.view()).map_err(|e| e.to_string())?;
-                let crate::Out::A1(p) = out else {
-                    return Err("predict returned a matrix".into());
-                };
-                p.insert_axis(Axis(1))
+    let score_fold = |xs: ArrayView2<f64>,
+                      ys: ArrayView1<f64>,
+                      p: &Map<String, Value>,
+                      (train, test): &(Vec<usize>, Vec<usize>)|
+     -> Result<f64, String> {
+        let (xtr, ytr) = (xs.select(Axis(0), train), ys.select(Axis(0), train));
+        let (xte, yte) = (xs.select(Axis(0), test), ys.select(Axis(0), test));
+        let params = Value::Object(p.clone()).to_string();
+        let m = fit_model(kind, &params, xtr.view(), Some(ytr.view()), None, 1)?;
+        let pred = if proba {
+            let out = m.predict_proba(xte.view()).map_err(|e| e.to_string())?;
+            let crate::Out::A2(p) = out else {
+                return Err("predict_proba returned a vector".into());
             };
-            metrics::metric(
-                &metric,
-                &metric_options,
-                Array1::from(yte.to_vec()),
-                pred,
-                None,
-            )
+            // Align the fold model's classes with the full set (a fold may miss one).
+            let mut fold_classes: Vec<f64> = ytr.to_vec();
+            fold_classes.sort_by(f64::total_cmp);
+            fold_classes.dedup();
+            let mut full = Array2::<f64>::zeros((p.nrows(), classes.len()));
+            for (j, c) in fold_classes.iter().enumerate() {
+                let col = classes
+                    .iter()
+                    .position(|v| v == c)
+                    .expect("fold class in the full set");
+                full.column_mut(col).assign(&p.column(j));
+            }
+            if classes.len() == 2 && metric != "log_loss" {
+                full.column(1).to_owned().insert_axis(Axis(1))
+            } else {
+                full
+            }
+        } else {
+            let out = m.predict(xte.view()).map_err(|e| e.to_string())?;
+            let crate::Out::A1(p) = out else {
+                return Err("predict returned a matrix".into());
+            };
+            p.insert_axis(Axis(1))
         };
-    let jobs: Vec<(usize, usize)> = (0..full_params.len())
-        .flat_map(|c| (0..folds.len()).map(move |f| (c, f)))
-        .collect();
-    let scores: Vec<Result<f64, String>> = run_fit(kind, threads, || {
-        jobs.par_iter()
-            .map(|&(c, f)| score_fold(&full_params[c], &folds[f]))
-            .collect()
-    })?;
-
-    let mut trials = Vec::with_capacity(full_params.len());
-    let mut best: Option<(usize, f64)> = None;
-    for c in 0..full_params.len() {
-        let fold_scores: Result<Vec<f64>, String> = scores[c * folds.len()..(c + 1) * folds.len()]
+        metrics::metric(
+            &metric,
+            &metric_options,
+            Array1::from(yte.to_vec()),
+            pred,
+            None,
+        )
+    };
+    // Mean / std CV score of candidates `cand` on rows `rows`.
+    let round = |rows: &[usize], cand: &[usize]| -> Result<Vec<CandidateScore>, String> {
+        let (xs, ys) = (x.select(Axis(0), rows), y.select(Axis(0), rows));
+        let folds = if stratify {
+            ut::stratified_k_fold(&xs, &ys, k, seed)
+        } else {
+            ut::shuffled_k_fold(rows.len(), k, seed)
+        }
+        .map_err(|e| e.to_string())?;
+        let jobs: Vec<(usize, usize)> = cand
             .iter()
-            .cloned()
+            .flat_map(|&c| (0..folds.len()).map(move |f| (c, f)))
             .collect();
-        match fold_scores {
-            Ok(s) => {
+        let scores: Vec<Result<f64, String>> = run_fit(kind, threads, || {
+            jobs.par_iter()
+                .map(|&(c, f)| score_fold(xs.view(), ys.view(), &full_params[c], &folds[f]))
+                .collect()
+        })?;
+        Ok(scores
+            .chunks(folds.len())
+            .map(|s| {
+                let s: Vec<f64> = s.iter().cloned().collect::<Result<_, _>>()?;
                 let mean = s.iter().sum::<f64>() / s.len() as f64;
                 let std =
                     (s.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
-                trials
-                    .push(json!({"trial": c, "params": cands[c], "score": mean, "score_std": std}));
-                let better = match best {
-                    None => mean.is_finite(),
-                    Some((_, b)) => mean.is_finite() && if minimise { mean < b } else { mean > b },
-                };
-                if better {
-                    best = Some((c, mean));
-                }
+                Ok((mean, std))
+            })
+            .collect())
+    };
+    let better = |a: f64, b: f64| if minimise { a < b } else { a > b };
+    let n = x.nrows();
+    let halving = matches!(o.search.as_deref(), Some("halving") | Some("halving_grid"));
+    let factor = o.factor.unwrap_or(3).max(2);
+    // Rounds: (rows, candidates). Halving starts on n / factor^(rounds-1)
+    // rows of a seeded permutation and keeps the best 1/factor each round.
+    let n_rounds = if halving {
+        let mut r = 1;
+        let mut c = full_params.len();
+        while c > 1 && n / factor.pow(r as u32) >= 2 * k {
+            c = c.div_ceil(factor);
+            r += 1;
+        }
+        r
+    } else {
+        1
+    };
+    let mut perm: Vec<usize> = (0..n).collect();
+    {
+        use rand::seq::SliceRandom;
+        perm.shuffle(&mut StdRng::seed_from_u64(seed));
+    }
+    let mut alive: Vec<usize> = (0..full_params.len()).collect();
+    let mut trials = Vec::new();
+    let mut best: Option<(usize, f64)> = None;
+    for r in 0..n_rounds {
+        let n_rows = if r + 1 == n_rounds {
+            n
+        } else {
+            n / factor.pow((n_rounds - 1 - r) as u32)
+        };
+        let mut rows: Vec<usize> = perm[..n_rows].to_vec();
+        rows.sort_unstable();
+        let res = round(&rows, &alive)?;
+        let mut scored: Vec<(usize, f64)> = Vec::new();
+        for (&c, res) in alive.iter().zip(res) {
+            let mut t = json!({"trial": c, "params": cands[c]});
+            if halving {
+                t["round"] = json!(r);
+                t["n_rows"] = json!(n_rows);
             }
-            Err(e) => trials.push(json!({"trial": c, "params": cands[c], "error": e})),
+            match res {
+                Ok((mean, std)) => {
+                    t["score"] = json!(mean);
+                    t["score_std"] = json!(std);
+                    if mean.is_finite() {
+                        scored.push((c, mean));
+                    }
+                }
+                Err(e) => t["error"] = json!(e),
+            }
+            trials.push(t);
+        }
+        // Stable: ties keep the earlier candidate.
+        scored.sort_by(|a, b| {
+            if better(a.1, b.1) {
+                std::cmp::Ordering::Less
+            } else if better(b.1, a.1) {
+                std::cmp::Ordering::Greater
+            } else {
+                a.0.cmp(&b.0)
+            }
+        });
+        best = scored.first().copied();
+        let keep = if r + 1 == n_rounds {
+            1
+        } else {
+            alive.len().div_ceil(factor).max(1)
+        };
+        alive = scored.iter().take(keep).map(|s| s.0).collect();
+        if alive.is_empty() {
+            break;
         }
     }
     let (bi, best_score) = best.ok_or_else(|| {
@@ -512,5 +586,31 @@ mod tests {
         .unwrap_err()
         .contains("every trial failed"));
         assert!(parse_space(r#"{"a": {"int": [5, 1]}}"#).is_err());
+    }
+
+    #[test]
+    fn halving_narrows_down_to_the_best_candidate() {
+        let (x, y) = data();
+        let r = tune(
+            "DecisionTreeRegressor",
+            r#"{"max_depth": [0, 1, 2, 3, 4, 5, 6, 7, 8]}"#,
+            r#"{"search": "halving_grid", "cv": 3, "factor": 3}"#,
+            x.view(),
+            y.view(),
+            None,
+            4,
+        )
+        .unwrap();
+        let t = r.trials.as_array().unwrap();
+        // 9 candidates on n/9 rows, 3 on n/3, 1 on all rows.
+        let per_round = |k: u64| t.iter().filter(|t| t["round"] == k).count();
+        assert_eq!(
+            (per_round(0), per_round(1), per_round(2)),
+            (9, 3, 1),
+            "{}",
+            r.trials
+        );
+        assert_eq!(t.last().unwrap()["n_rows"], 200);
+        assert_ne!(r.best_params["max_depth"], 0, "{}", r.trials);
     }
 }

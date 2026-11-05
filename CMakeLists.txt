@@ -119,6 +119,7 @@ set(EXTENSION_SOURCES
     src/functions/ml_macros.cpp
     src/functions/ml_text.cpp
     src/functions/ml_stats.cpp
+    src/functions/ml_impute.cpp
 )
 
 # Build static extension

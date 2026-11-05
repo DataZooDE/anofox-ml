@@ -1,0 +1,75 @@
+# name: test/sql/ml_tune.test
+# description: hyperparameter search (grid / random) with k-fold CV
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# A step at x = 5: depth 1 is needed, depth 0 cannot fit it.
+statement ok
+CREATE TABLE d AS SELECT i AS id, 'g' || (i % 2) AS g, (i % 10)::DOUBLE AS x,
+    CASE WHEN i % 10 >= 5 THEN 10.0 ELSE 0.0 END + ((i * 37) % 7) / 10.0 AS y,
+    CASE WHEN i % 10 >= 5 THEN 'hi' ELSE 'lo' END AS c
+FROM range(400) t(i);
+
+query III
+SELECT t.best_params, t.best_score > 0.99, ml_predict(t.model, [7.0]) > 9
+FROM (SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": [0, 1, 3]}', '{"search": "grid", "cv": 4}') AS t FROM d);
+----
+{"max_depth":1}	true	true
+
+# losses are minimised; fixed params apply to every candidate; one result per group
+query II
+SELECT count(*), bool_and(t.best_score < 1.0 AND t.best_params LIKE '%"min_samples_leaf":2%')
+FROM (SELECT g, ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": {"int": [1, 6]}}',
+                            '{"n_trials": 5, "metric": "rmse", "params": {"min_samples_leaf": 2}}') AS t FROM d GROUP BY g);
+----
+2	true
+
+# seeded random search: identical whatever the thread count
+statement ok
+SET anofox_ml_threads = 1;
+
+statement ok
+CREATE TABLE r1 AS SELECT ml_tune_agg('RandomForestRegressor', y, [x], '{"n_estimators": {"int": [5, 40], "log": true}, "max_depth": {"int": [1, 6]}}', '{"n_trials": 4, "seed": 7}') AS t FROM d;
+
+statement ok
+SET anofox_ml_threads = 8;
+
+query I
+SELECT r1.t = ml_tune_agg('RandomForestRegressor', y, [x], '{"n_estimators": {"int": [5, 40], "log": true}, "max_depth": {"int": [1, 6]}}', '{"n_trials": 4, "seed": 7}') FROM d, r1 GROUP BY r1.t;
+----
+true
+
+statement ok
+RESET anofox_ml_threads;
+
+# classifiers: stratified folds, string labels, probability metrics
+query II
+SELECT t.best_params, ml_predict_label(t.model, [7.0])
+FROM (SELECT ml_tune_agg('KnnClassifier', c, [x], '{"n_neighbors": [1, 5, 15]}', '{"search": "grid", "metric": "log_loss"}') AS t FROM d);
+----
+{"n_neighbors":1}	hi
+
+# failed candidates are recorded, not fatal
+query I
+SELECT t.trials LIKE '%"error"%' FROM (SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"min_samples_leaf": [1, -5]}', '{"search": "grid"}') AS t FROM d);
+----
+true
+
+statement error
+SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"min_samples_leaf": [-5]}', '{"search": "grid"}') FROM d;
+----
+every trial failed
+
+statement error
+SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": {"int": [1, 6]}}', '{"search": "grid"}') FROM d;
+----
+grid search needs a list of values
+
+statement error
+SELECT ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": [1]}', '{"folds": 3}') FROM d;
+----
+unknown field

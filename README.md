@@ -15,7 +15,7 @@
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 104 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. Tuning and the remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested. The remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
 
 ## ✨ Key Features
@@ -234,6 +234,23 @@ SELECT ml_fit_agg('MultinomialNB', label, ml_hashing_vectorize(body, 1024, '{"al
 SELECT ml_predict_label(model, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) FROM new_mails, spam_model;
 ```
 
+### Hyperparameter Tuning
+
+`ml_tune_agg(kind, y, [x1, x2, …], search_space [, options])` searches hyperparameters by k-fold cross-validation and returns `STRUCT(best_params, best_score, model, trials)`. `model` is the best candidate refitted on all rows, ready for `ml_predict`, and `trials` is a JSON array of every candidate's mean / std score (or its error). Per `GROUP BY` group, one search each.
+
+- **Search space** (JSON object, one entry per parameter): a list of values (grid / categorical), `{"int": [lo, hi]}`, `{"float": [lo, hi]}` (both with optional `"log": true`) or `{"categorical": […]}`.
+- **Options:** `search` (`"random"` default, or `"grid"`), `n_trials` (20), `cv` (5 folds; stratified for classifiers unless `"stratify": false`), `metric` (any metric aggregate name; default `accuracy` / `r2`; losses are minimised), `metric_options`, `params` (fixed for every candidate), `seed`.
+
+Candidates are drawn from `seed` up front and every candidate × fold is scored in parallel, so the result is the same whatever the thread count.
+
+```sql
+SELECT store, t.best_params, t.best_score
+FROM (SELECT store, ml_tune_agg('HistGradientBoostingRegressor', sales, [price, promo, dow],
+        '{"max_depth": {"int": [2, 12]}, "learning_rate": {"float": [0.01, 0.3], "log": true}}',
+        '{"n_trials": 30, "metric": "rmse"}') AS t
+      FROM train GROUP BY store);
+```
+
 ### Conformal Prediction
 
 Split conformal prediction: calibrate a fitted model on held-out rows, then ask for prediction intervals (regressors) or prediction sets (classifiers) at any miscoverage `alpha`. Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.
@@ -354,7 +371,7 @@ SELECT avg(rmse), stddev(rmse) FROM (
 
 | Topic | Issue |
 |---|---|
-| Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
+| TPE / Optuna-style tuning (rustuna) on top of `ml_tune_agg` | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 

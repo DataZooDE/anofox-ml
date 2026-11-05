@@ -1355,7 +1355,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(importance_set);
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
-        {"ml_inverse_transform", "inverse_transform"},
+{"ml_predict_log_proba", "predict_log_proba"}, {"ml_inverse_transform", "inverse_transform"},
         {"ml_score_samples", "score_samples"},
     };
     for (const auto &f : list_functions) {

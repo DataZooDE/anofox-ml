@@ -366,3 +366,10 @@ statement error
 SELECT ml_coefficients(ml_fit_agg('DecisionTreeRegressor', i::DOUBLE, [i::DOUBLE])) FROM range(10) t(i);
 ----
 has no coef / weights
+
+# predict_log_proba = ln(predict_proba)
+query I
+SELECT list_bool_and(list_transform(list_zip(ml_predict_log_proba(m, [3.0]), ml_predict_proba(m, [3.0])), p -> abs(p[1] - ln(p[2])) < 1e-12 OR (p[2] = 0 AND p[1] = '-inf'::DOUBLE)))
+FROM (SELECT ml_fit_agg('GaussianNB', (i % 3)::DOUBLE, [i::DOUBLE]) AS m FROM range(30) t(i));
+----
+true

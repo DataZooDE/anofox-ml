@@ -58,9 +58,10 @@ struct Meta {
 type CachedModel = Option<(u64, usize, Meta, Box<dyn DynModel>)>;
 
 /// Prediction methods callable through [`anofox_ml_apply`].
-const METHODS: [&str; 6] = [
+const METHODS: [&str; 7] = [
     "predict",
     "predict_proba",
+    "predict_log_proba",
     "decision_function",
     "transform",
     "inverse_transform",
@@ -328,6 +329,12 @@ fn run_method(
         p.install(|| match method {
             "predict" => model.predict(x),
             "predict_proba" => model.predict_proba(x),
+            // ln of the probabilities (anofox-ml 0.2's DynModel has no
+            // predict_log_proba); 0 probabilities give -inf.
+            "predict_log_proba" => model.predict_proba(x).map(|o| match o {
+                Out::A1(a) => Out::A1(a.mapv(f64::ln)),
+                Out::A2(a) => Out::A2(a.mapv(f64::ln)),
+            }),
             "decision_function" => model.decision_function(x),
             "transform" => model.transform(x),
             "inverse_transform" => model.inverse_transform(x),

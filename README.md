@@ -340,7 +340,6 @@ SELECT avg(rmse), stddev(rmse) FROM (
 | Spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
-| Parallelism within a single fit | [#7](https://github.com/DataZooDE/anofox-ml/issues/7) |
 | Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
 ## 🧮 Estimators
@@ -371,7 +370,7 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 - **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`. With `VARCHAR` targets, the sorted distinct labels are stored as `labels`, the model learns their index, and `classes` / `ml_predict_proba` columns follow the label order.
 - **Feature count:** predicting with a feature list of the wrong length is an error.
 - **Memory:** a fitting aggregate holds its group's training set in memory. `SET anofox_ml_max_fit_values = n` caps it per group (rows × features, default 100 million ≈ 800 MB; `0` = unlimited). Past the cap the query fails with a hint; sample large groups with `USING SAMPLE` before fitting.
-- **Parallelism:** DuckDB parallelises across groups. Each fit currently runs single-threaded inside a DuckDB worker, so an ungrouped fit uses one core. [#7](https://github.com/DataZooDE/anofox-ml/issues/7) proposes letting a single fit use the idle cores.
+- **Parallelism:** fits run in one shared thread pool sized to DuckDB's `threads`. DuckDB spreads groups over its workers, and estimators with internal parallelism (forests, bagging, isolation forests, …) use the pool too, so a single big model uses every core while many groups still share the same threads. `SET anofox_ml_threads = n` caps the threads of the fits (`0` = DuckDB's `threads`, `1` = sequential). Predictions run single-threaded per chunk, with DuckDB parallelising across chunks. Seeded models are identical whatever the thread count.
 - **Determinism:** estimators with randomness take a `seed` parameter with a fixed default, so the same query gives the same model.
 
 ## 🌍 Multi-Language Support

@@ -65,6 +65,10 @@ void LoadInternal(ExtensionLoader &loader) {
                               "Largest training set (rows x features) one fitting aggregate may hold in memory per "
                               "group; 0 = unlimited",
                               LogicalType(LogicalTypeId::UBIGINT), Value::UBIGINT(100000000));
+    config.AddExtensionOption("anofox_ml_threads",
+                              "Threads a single fit may use (forests, ensembles, ...); 0 = DuckDB's threads, "
+                              "1 = sequential",
+                              LogicalType(LogicalTypeId::UBIGINT), Value::UBIGINT(0));
     RegisterTelemetryOptions(loader);
 #ifdef ANOFOX_TELEMETRY_ENABLED
     auto &telemetry = PostHogTelemetry::Instance();

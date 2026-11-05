@@ -282,6 +282,7 @@ mod tests {
             Some(ArrayView1::from(&y)),
             None,
             None,
+            1,
         )
         .unwrap();
         let cal = conformalize(&blob, xv.view(), ArrayView1::from(&y)).unwrap();

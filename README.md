@@ -319,6 +319,16 @@ For labels that span time (a return over the next days, a churn window), `ml_pur
 | `purged_kfold` | `n_splits` (5), `embargo` (0 rows) |
 | `combinatorial_purged` | `n_groups` (6), `n_test_groups` (2), `embargo`. Test entries carry the backtest `path` they belong to (one entry per path); `WHERE role = 'test' AND path = k` is a complete out-of-sample backtest |
 
+For spatial data, `ml_spatial_cv_splits_agg(id, coords DOUBLE[], method, options ORDER BY id)` keeps nearby points out of each other's training data:
+
+| Method | Options |
+|---|---|
+| `spatial_block_kfold` | `block_size` (cell width in coordinate units, required), `n_splits` (5), `seed`; whole cells share a fold |
+| `kfold` | `n_splits`, `seed` (usually with a `buffer`) |
+| `buffered_loo` | `buffer` (radius, required): one split per point, neighbours within the radius left out of training |
+
+`buffer` (any method) removes training points within that distance of a test point of the same split, and `metric` is `"euclidean"` (default) or `"haversine"` (km, coordinates `[lat, lon]` in degrees).
+
 ```sql
 -- 5-fold cross-validated RMSE of a random forest
 WITH folds AS (
@@ -337,7 +347,6 @@ SELECT avg(rmse), stddev(rmse) FROM (
 
 | Topic | Issue |
 |---|---|
-| Spatial splitters | [#15](https://github.com/DataZooDE/anofox-ml/issues/15) |
 | Hyperparameter tuning (`ml_tune_agg`, rustuna) | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Cross-conformal (CV+, jackknife+) and conformalized quantile regression | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Everything else in anofox-ml 0.2.0 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |

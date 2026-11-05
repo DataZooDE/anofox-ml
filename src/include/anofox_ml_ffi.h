@@ -91,6 +91,10 @@ char *anofox_ml_cv_splits(const char *method, const char *options, size_t n, con
 // whose labels span [t_start[i], t_end[i]].
 char *anofox_ml_purged_cv_splits(const char *method, const char *options, size_t n, const double *t_start,
                                  const double *t_end, AnofoxMlSplits *out);
+// Spatial splits (spatial_block_kfold, kfold, buffered_loo; optional buffer)
+// of n rows with n x d row-major coordinates.
+char *anofox_ml_spatial_cv_splits(const char *method, const char *options, size_t n, size_t d, const double *coords,
+                                  AnofoxMlSplits *out);
 void anofox_ml_free_splits(AnofoxMlSplits s);
 
 // anofox_ml_metric on string labels (y_true, y_pred hold n strings each).

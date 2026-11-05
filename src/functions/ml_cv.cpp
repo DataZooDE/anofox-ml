@@ -329,6 +329,147 @@ void PurgedFinalize(Vector &state_vector, AggregateInputData &, Vector &result, 
     }
 }
 
+//===--------------------------------------------------------------------===//
+// ml_spatial_cv_splits_agg(id BIGINT, coords DOUBLE[], method VARCHAR, options VARCHAR)
+//   -> STRUCT(id, split, role)[]
+// Spatial block k-fold / k-fold with a spatial buffer / buffered LOO.
+//===--------------------------------------------------------------------===//
+constexpr const char *kSpatial = "ml_spatial_cv_splits_agg";
+
+struct SpatialState {
+    bool initialized;
+    std::string *method;
+    std::string *options;
+    std::vector<int64_t> *ids;
+    std::vector<double> *coords;
+    idx_t d;
+};
+
+void SpatialInitialize(const AggregateFunction &, data_ptr_t state_p) {
+    auto &s = *reinterpret_cast<SpatialState *>(state_p);
+    s.initialized = false;
+    s.method = new std::string();
+    s.options = new std::string();
+    s.ids = new std::vector<int64_t>();
+    s.coords = new std::vector<double>();
+    s.d = 0;
+}
+
+void SpatialDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
+    auto states = FlatVector::GetData<SpatialState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        delete states[i]->method;
+        delete states[i]->options;
+        delete states[i]->ids;
+        delete states[i]->coords;
+    }
+}
+
+void SpatialUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &state_vector, idx_t count) {
+    UnifiedVectorFormat id_data, c_data, m_data, o_data, sdata;
+    inputs[0].ToUnifiedFormat(count, id_data);
+    inputs[1].ToUnifiedFormat(count, c_data);
+    inputs[2].ToUnifiedFormat(count, m_data);
+    inputs[3].ToUnifiedFormat(count, o_data);
+    state_vector.ToUnifiedFormat(count, sdata);
+    auto lists = UnifiedVectorFormat::GetData<list_entry_t>(c_data);
+    auto &child = ListVector::GetEntry(inputs[1]);
+    UnifiedVectorFormat child_data;
+    child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
+    auto values = UnifiedVectorFormat::GetData<double>(child_data);
+    auto states = reinterpret_cast<SpatialState **>(sdata.data);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[sdata.sel->get_index(i)];
+        auto ii = id_data.sel->get_index(i);
+        auto ci = c_data.sel->get_index(i);
+        auto mi = m_data.sel->get_index(i);
+        if (!id_data.validity.RowIsValid(ii) || !c_data.validity.RowIsValid(ci) || !m_data.validity.RowIsValid(mi)) {
+            continue; // rows with a NULL id, coordinates or method are left out
+        }
+        const auto &entry = lists[ci];
+        bool null_element = false;
+        for (idx_t j = 0; j < entry.length; j++) {
+            null_element = null_element || !child_data.validity.RowIsValid(child_data.sel->get_index(entry.offset + j));
+        }
+        if (null_element) {
+            continue;
+        }
+        if (!s.initialized) {
+            s.initialized = true;
+            s.d = entry.length;
+            *s.method = UnifiedVectorFormat::GetData<string_t>(m_data)[mi].GetString();
+            auto oi = o_data.sel->get_index(i);
+            if (o_data.validity.RowIsValid(oi)) {
+                *s.options = UnifiedVectorFormat::GetData<string_t>(o_data)[oi].GetString();
+            }
+        } else if (entry.length != s.d) {
+            throw InvalidInputException("%s: every coordinate list must have %llu values", kSpatial,
+                                        (unsigned long long)s.d);
+        }
+        s.ids->push_back(UnifiedVectorFormat::GetData<int64_t>(id_data)[ii]);
+        for (idx_t j = 0; j < entry.length; j++) {
+            s.coords->push_back(values[child_data.sel->get_index(entry.offset + j)]);
+        }
+    }
+}
+
+void SpatialCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &, idx_t count) {
+    auto sources = FlatVector::GetData<SpatialState *>(source_vector);
+    auto targets = FlatVector::GetData<SpatialState *>(target_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &src = *sources[i];
+        auto &tgt = *targets[i];
+        if (!src.initialized) {
+            continue;
+        }
+        if (!tgt.initialized) {
+            tgt.initialized = true;
+            tgt.d = src.d;
+            *tgt.method = *src.method;
+            *tgt.options = *src.options;
+        } else if (tgt.d != src.d) {
+            throw InvalidInputException("%s: coordinate lists of different lengths", kSpatial);
+        }
+        tgt.ids->insert(tgt.ids->end(), src.ids->begin(), src.ids->end());
+        tgt.coords->insert(tgt.coords->end(), src.coords->begin(), src.coords->end());
+    }
+}
+
+void SpatialFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<SpatialState *>(state_vector);
+    auto entries = FlatVector::GetData<list_entry_t>(result);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.ids->empty()) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        AnofoxMlSplits splits {nullptr, nullptr, nullptr, nullptr, 0};
+        char *err = anofox_ml_spatial_cv_splits(s.method->c_str(), s.options->c_str(), s.ids->size(), s.d,
+                                                s.coords->data(), &splits);
+        if (err) {
+            std::string msg(err);
+            anofox_ml_free_string(err);
+            throw InvalidInputException("%s: %s", kSpatial, msg);
+        }
+        idx_t list_offset = ListVector::GetListSize(result);
+        ListVector::Reserve(result, list_offset + splits.len);
+        auto &fields = StructVector::GetEntries(ListVector::GetEntry(result));
+        auto id_out = FlatVector::GetData<int64_t>(*fields[0]);
+        auto split_out = FlatVector::GetData<int32_t>(*fields[1]);
+        auto role_out = FlatVector::GetData<string_t>(*fields[2]);
+        for (idx_t e = 0; e < splits.len; e++) {
+            id_out[list_offset + e] = (*s.ids)[splits.row[e]];
+            split_out[list_offset + e] = static_cast<int32_t>(splits.split[e]);
+            role_out[list_offset + e] = string_t(splits.test[e] ? "test" : "train");
+        }
+        anofox_ml_free_splits(splits);
+        ListVector::SetListSize(result, list_offset + splits.len);
+        entries[row] = list_entry_t(list_offset, splits.len);
+    }
+}
+
 } // anonymous namespace
 
 void RegisterMlCv(ExtensionLoader &loader) {
@@ -361,6 +502,12 @@ void RegisterMlCv(ExtensionLoader &loader) {
                              AggregateFunction::StateSize<PurgedState>, PurgedInitialize, PurgedUpdate, PurgedCombine,
                              PurgedFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr, PurgedDestroy);
     loader.RegisterFunction(purged);
+
+    AggregateFunction spatial(kSpatial, {B, LogicalType::LIST(D), V, V}, result,
+                              AggregateFunction::StateSize<SpatialState>, SpatialInitialize, SpatialUpdate,
+                              SpatialCombine, SpatialFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr,
+                              nullptr, SpatialDestroy);
+    loader.RegisterFunction(spatial);
 }
 
 } // namespace duckdb

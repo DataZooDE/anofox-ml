@@ -167,3 +167,50 @@ statement error
 SELECT ml_purged_cv_splits_agg(id, t0, t1, 'kfold', '{}' ORDER BY t0) FROM r;
 ----
 unknown method
+
+# Spatial CV on a 10 x 10 grid of points one unit apart.
+statement ok
+CREATE TABLE grid AS SELECT i AS id, (i % 10)::DOUBLE AS gx, (i // 10)::DOUBLE AS gy, (i % 10 + i // 10)::DOUBLE AS v FROM range(100) t(i);
+
+# 5 x 5 blocks -> 4 blocks; each split tests one whole block
+query II
+SELECT count(DISTINCT split), bool_and(n = 25) FROM (
+    SELECT split, count(*) AS n FROM (
+        SELECT unnest(ml_spatial_cv_splits_agg(id, [gx, gy], 'spatial_block_kfold', '{"block_size": 5, "n_splits": 4}' ORDER BY id), recursive := true) FROM grid)
+    WHERE role = 'test' GROUP BY split);
+----
+4	true
+
+# with a buffer, no training point lies within 1.5 of a test point of its split
+query I
+WITH s AS (SELECT unnest(ml_spatial_cv_splits_agg(id, [gx, gy], 'spatial_block_kfold', '{"block_size": 5, "n_splits": 4, "buffer": 1.5}' ORDER BY id), recursive := true) FROM grid)
+SELECT count(*) FROM s a JOIN grid ga ON a.id = ga.id JOIN s b ON a.split = b.split JOIN grid gb ON b.id = gb.id
+WHERE a.role = 'train' AND b.role = 'test' AND sqrt((ga.gx - gb.gx) ^ 2 + (ga.gy - gb.gy) ^ 2) <= 1.5;
+----
+0
+
+# buffered leave-one-out: one split per point, neighbours within the radius left out of training
+query II
+SELECT count(DISTINCT split), max(n_train) FROM (
+    SELECT split, count(*) FILTER (role = 'train') AS n_train FROM (
+        SELECT unnest(ml_spatial_cv_splits_agg(id, [gx, gy], 'buffered_loo', '{"buffer": 1.0}' ORDER BY id), recursive := true) FROM grid)
+    GROUP BY split);
+----
+100	97
+
+# haversine distances on [lat, lon]
+query I
+SELECT count(DISTINCT split) FROM (
+    SELECT unnest(ml_spatial_cv_splits_agg(id, [48 + gy / 10, 11 + gx / 10], 'kfold', '{"n_splits": 3, "buffer": 5, "metric": "haversine"}' ORDER BY id), recursive := true) FROM grid);
+----
+3
+
+statement error
+SELECT ml_spatial_cv_splits_agg(id, [gx, gy], 'spatial_block_kfold', '{}') FROM grid;
+----
+needs block_size
+
+statement error
+SELECT ml_spatial_cv_splits_agg(id, [gx, gy, v], 'kfold', '{"buffer": 1, "metric": "haversine"}') FROM grid;
+----
+haversine needs [latitude, longitude]

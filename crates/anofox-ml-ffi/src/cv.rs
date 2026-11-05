@@ -318,6 +318,119 @@ fn splits_out(v: &[Entry]) -> AnofoxMlSplits {
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SpatialOptions {
+    n_splits: Option<usize>,
+    seed: Option<u64>,
+    /// Cell width of `spatial_block_kfold`, in coordinate units.
+    block_size: Option<f64>,
+    /// Remove training points within this distance of a test point (radius
+    /// of `buffered_loo`).
+    buffer: Option<f64>,
+    /// `"euclidean"` (default) or `"haversine"` (km; coordinates
+    /// `[lat, lon]` in degrees).
+    metric: Option<String>,
+}
+
+/// Spatial splits of rows with coordinates `coords` (`n × d`):
+/// `spatial_block_kfold`, `kfold` (both with an optional `buffer`) or
+/// `buffered_loo`.
+pub(crate) fn spatial_splits(
+    method: &str,
+    options: &str,
+    coords: &Array2<f64>,
+) -> Result<Vec<Entry>, String> {
+    let o: SpatialOptions = if options.trim().is_empty() {
+        SpatialOptions::default()
+    } else {
+        serde_json::from_str(options).map_err(|e| format!("invalid options JSON: {e}"))?
+    };
+    let metric = match o.metric.as_deref() {
+        None | Some("euclidean") => sp::SpatialMetric::Euclidean,
+        Some("haversine") => {
+            if coords.ncols() != 2 {
+                return Err("haversine needs [latitude, longitude] coordinates".into());
+            }
+            sp::SpatialMetric::Haversine
+        }
+        Some(m) => {
+            return Err(format!(
+                "metric must be \"euclidean\" or \"haversine\", got \"{m}\""
+            ))
+        }
+    };
+    let k = o.n_splits.unwrap_or(5);
+    let seed = o.seed.unwrap_or(0);
+    let e = |e: anofox_ml_core::RustMlError| e.to_string();
+    let mut splits = match method {
+        "spatial_block_kfold" => {
+            let size = o.block_size.ok_or("spatial_block_kfold needs block_size")?;
+            sp::spatial_block_k_fold(coords, size, k, seed).map_err(e)?
+        }
+        "kfold" => ut::shuffled_k_fold(coords.nrows(), k, seed).map_err(e)?,
+        "buffered_loo" => {
+            let r = o.buffer.ok_or("buffered_loo needs buffer (the radius)")?;
+            sp::buffered_leave_one_out(coords, r, metric).map_err(e)?
+        }
+        _ => {
+            return Err(format!(
+                "unknown method '{method}' (known: [\"spatial_block_kfold\", \"kfold\", \"buffered_loo\"])"
+            ))
+        }
+    };
+    if method != "buffered_loo" {
+        if let Some(r) = o.buffer {
+            splits = sp::spatial_buffer(&splits, coords, r, metric).map_err(e)?;
+        }
+    }
+    let mut out = Vec::new();
+    for (split, (train, test)) in splits.iter().enumerate() {
+        out.extend(train.iter().map(|&r| (r, split, false, -1)));
+        out.extend(test.iter().map(|&r| (r, split, true, -1)));
+    }
+    Ok(out)
+}
+
+/// Spatial cross-validation splits of `n` rows with `n × d` row-major
+/// coordinates. As [`anofox_ml_cv_splits`].
+///
+/// # Safety
+/// `method` / `options` are NUL-terminated (`options` may be NULL);
+/// `coords` holds `n * d` doubles; `out` is writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_spatial_cv_splits(
+    method: *const c_char,
+    options: *const c_char,
+    n: usize,
+    d: usize,
+    coords: *const f64,
+    out: *mut AnofoxMlSplits,
+) -> *mut c_char {
+    let run = || -> Result<Vec<Entry>, String> {
+        let method = str_arg(method, "method")?;
+        let options = if options.is_null() {
+            ""
+        } else {
+            str_arg(options, "options")?
+        };
+        if coords.is_null() || n == 0 || d == 0 {
+            return Err("no rows".into());
+        }
+        let c = Array2::from_shape_vec((n, d), std::slice::from_raw_parts(coords, n * d).to_vec())
+            .map_err(|e| e.to_string())?;
+        spatial_splits(method, options, &c)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(v)) => {
+            *out = splits_out(&v);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while splitting"),
+    }
+}
+
 #[repr(C)]
 pub struct AnofoxMlSplits {
     /// Input row index of each entry.
@@ -478,5 +591,49 @@ mod tests {
             rows.sort_unstable();
             assert_eq!(rows, (0..12).collect::<Vec<_>>());
         }
+    }
+
+    #[test]
+    fn spatial_blocks_and_buffers() {
+        // A 10 x 10 grid of points, 1 unit apart.
+        let c = Array2::from_shape_fn((100, 2), |(i, j)| {
+            if j == 0 {
+                (i % 10) as f64
+            } else {
+                (i / 10) as f64
+            }
+        });
+        let v = spatial_splits(
+            "spatial_block_kfold",
+            r#"{"block_size": 5, "n_splits": 4}"#,
+            &c,
+        )
+        .unwrap();
+        // 4 blocks of 25 points: each split tests exactly one block.
+        for s in 0..4 {
+            assert_eq!(v.iter().filter(|e| e.1 == s && e.2).count(), 25);
+        }
+        // A buffer of 1.5 removes the training points next to the test block.
+        let b = spatial_splits(
+            "spatial_block_kfold",
+            r#"{"block_size": 5, "n_splits": 4, "buffer": 1.5}"#,
+            &c,
+        )
+        .unwrap();
+        for s in 0..4 {
+            let near = |r: usize| {
+                b.iter().filter(|e| e.1 == s && e.2).any(|t| {
+                    let d = (c[[r, 0]] - c[[t.0, 0]]).hypot(c[[r, 1]] - c[[t.0, 1]]);
+                    d <= 1.5
+                })
+            };
+            assert!(b.iter().filter(|e| e.1 == s && !e.2).all(|e| !near(e.0)));
+            assert!(b.iter().filter(|e| e.1 == s && !e.2).count() < 75);
+        }
+        let l = spatial_splits("buffered_loo", r#"{"buffer": 1.0}"#, &c).unwrap();
+        assert_eq!(l.iter().filter(|e| e.2).count(), 100);
+        assert!(spatial_splits("spatial_block_kfold", "{}", &c)
+            .unwrap_err()
+            .contains("block_size"));
     }
 }

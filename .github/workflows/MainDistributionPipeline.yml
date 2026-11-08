@@ -132,3 +132,45 @@ jobs:
 
       - name: Run Rust tests
         run: cargo test --all-features
+
+  # On a version tag (v*): attach the extension binaries of this run to a
+  # GitHub release, with the CHANGELOG section of that version as notes.
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [duckdb-stable-build, wasm, build-and-test-rust]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: anofox_ml-v1.5.6-extension-*
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          mkdir dist
+          for dir in artifacts/anofox_ml-v1.5.6-extension-*; do
+            arch="${dir##*-extension-}"
+            for f in "$dir"/*; do
+              ext="${f##*/anofox_ml}"
+              cp "$f" "dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-v1.5.6-${arch}${ext}"
+            done
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            /^## / { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } }
+            found' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no CHANGELOG.md section for ${GITHUB_REF_NAME}"; exit 1; }
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "anofox_ml $GITHUB_REF_NAME" --notes-file notes.md --verify-tag

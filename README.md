@@ -67,7 +67,24 @@ A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-
 
 ## Installation
 
-The extension is not published as a DuckDB community extension yet; that is on hold until the API has matured. Build it from source for now.
+The extension is not published as a DuckDB community extension yet; that is on hold until the API has matured. Download a prebuilt binary from a GitHub release, or build it from source.
+
+### From a GitHub Release
+
+Every [release](https://github.com/DataZooDE/anofox-ml/releases) has binaries for Linux, macOS and Windows (amd64 / arm64) and DuckDB-Wasm, built for one DuckDB version (named in the file, e.g. `anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.duckdb_extension`). They load only into that DuckDB version. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
+
+```bash
+duckdb -unsigned
+```
+
+```sql
+LOAD '/path/to/anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.duckdb_extension';
+SELECT ml_version();
+```
+
+The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R.
+
+`SHA256SUMS` in the release lists the checksums. Changes per version are in [CHANGELOG.md](CHANGELOG.md).
 
 ### From Source
 

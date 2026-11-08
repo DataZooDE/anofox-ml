@@ -297,7 +297,7 @@ pub(crate) fn tune(
             .iter()
             .flat_map(|&c| (0..folds.len()).map(move |f| (c, f)))
             .collect();
-        let scores: Vec<Result<f64, String>> = run_fit(kind, threads, || {
+        let scores: Vec<Result<f64, String>> = run_fit(threads, || {
             jobs.par_iter()
                 .map(|&(c, f)| score_fold(xs.view(), ys.view(), &full_params[c], &folds[f]))
                 .collect()

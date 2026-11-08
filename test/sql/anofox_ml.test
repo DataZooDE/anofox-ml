@@ -315,7 +315,7 @@ statement ok
 RESET anofox_ml_max_fit_values;
 
 # Parallel fits: a single fit uses the shared pool, and the model does not
-# depend on the thread count (KMeans always fits sequentially).
+# depend on the thread count.
 statement ok
 CREATE TABLE par AS SELECT i AS id, (hash(i) % 1000) / 100.0 AS a, (hash(i, 'b') % 1000) / 100.0 AS b FROM range(3000) t(i);
 
@@ -371,5 +371,36 @@ has no coef / weights
 query I
 SELECT list_bool_and(list_transform(list_zip(ml_predict_log_proba(m, [3.0]), ml_predict_proba(m, [3.0])), p -> abs(p[1] - ln(p[2])) < 1e-12 OR (p[2] = 0 AND p[1] = '-inf'::DOUBLE)))
 FROM (SELECT ml_fit_agg('GaussianNB', (i % 3)::DOUBLE, [i::DOUBLE]) AS m FROM range(30) t(i));
+----
+true
+
+# Kinds added in anofox-ml 0.3 / 0.4 fit and predict through the generic path.
+statement ok
+CREATE TABLE k04 AS SELECT i, (hash(i) % 1000) / 100.0 AS a, (hash(i, 'b') % 1000) / 100.0 AS b,
+    CASE WHEN (hash(i) % 1000) / 100.0 + (hash(i, 'b') % 1000) / 100.0 > 10 THEN 'hi' ELSE 'lo' END AS lab FROM range(400) t(i);
+
+query I
+SELECT count(*) FROM ml_estimators() WHERE kind IN ('CatBoostRegressor', 'OneVsRestClassifier', 'SplitConformalRegressor', 'LedoitWolf', 'KernelDensity');
+----
+5
+
+query I
+SELECT abs(ml_predict(ml_fit_agg('SplitConformalRegressor', a + b, [a, b]), [1.0, 2.0]) - 3) < 1e-9 FROM k04;
+----
+true
+
+query II
+SELECT ml_predict(m, [9.0, 9.0]), ml_predict(m, [0.5, 0.5]) FROM (SELECT ml_fit_agg('OneVsRestClassifier', lab, [a, b]) AS m FROM k04);
+----
+0.0	1.0
+
+query I
+SELECT ml_predict_proba(m, [9.0, 9.0])[1] > 0.5 FROM (SELECT ml_fit_agg('CatBoostClassifier', lab, [a, b], '{"iterations": 30}') AS m FROM k04);
+----
+true
+
+# ExtraTreesClassifier has predict_proba since 0.3.
+query I
+SELECT list_contains(ml_model_info(ml_fit_agg('ExtraTreesClassifier', lab, [a, b], '{"n_estimators": 5}')).capabilities, 'predict_proba') FROM k04;
 ----
 true

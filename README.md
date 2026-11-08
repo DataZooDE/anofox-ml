@@ -71,20 +71,19 @@ The extension is not published as a DuckDB community extension yet; that is on h
 
 ### From a GitHub Release
 
-Every [release](https://github.com/DataZooDE/anofox-ml/releases) has binaries for Linux, macOS and Windows (amd64 / arm64) and DuckDB-Wasm, built for one DuckDB version (named in the file, e.g. `anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.duckdb_extension`). They load only into that DuckDB version. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
+Every [release](https://github.com/DataZooDE/anofox-ml/releases) has a zip per platform (Linux, macOS and Windows; amd64 / arm64), built for one DuckDB version, which is named in the file, e.g. `anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip`. The extension loads only into that DuckDB version. Unzip it and keep the file name `anofox_ml.duckdb_extension`, because DuckDB derives the entry point from the name. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
 
 ```bash
+unzip anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip
 duckdb -unsigned
 ```
 
 ```sql
-LOAD '/path/to/anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.duckdb_extension';
+LOAD './anofox_ml.duckdb_extension';
 SELECT ml_version();
 ```
 
-The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R.
-
-`SHA256SUMS` in the release lists the checksums. Changes per version are in [CHANGELOG.md](CHANGELOG.md).
+The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R. `SHA256SUMS` in the release lists the checksums. There are no DuckDB-Wasm binaries yet ([#29](https://github.com/DataZooDE/anofox-ml/issues/29)). Changes per version are in [CHANGELOG.md](CHANGELOG.md).
 
 ### From Source
 

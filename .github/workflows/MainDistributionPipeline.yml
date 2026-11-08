@@ -150,15 +150,17 @@ jobs:
           pattern: anofox_ml-v1.5.6-extension-*
           path: artifacts
 
+      # DuckDB derives the entry point from the file name, so each platform
+      # ships as a zip holding anofox_ml.duckdb_extension under that name.
+      # The wasm builds are left out: they don't link the Rust core yet
+      # (DataZooDE/anofox-ml#29).
       - name: Collect binaries
         run: |
           mkdir dist
           for dir in artifacts/anofox_ml-v1.5.6-extension-*; do
             arch="${dir##*-extension-}"
-            for f in "$dir"/*; do
-              ext="${f##*/anofox_ml}"
-              cp "$f" "dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-v1.5.6-${arch}${ext}"
-            done
+            case "$arch" in wasm_*) continue ;; esac
+            (cd "$dir" && zip -9 "$GITHUB_WORKSPACE/dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-v1.5.6-${arch}.zip" anofox_ml.duckdb_extension)
           done
           (cd dist && sha256sum * > SHA256SUMS)
           ls -l dist

@@ -147,11 +147,6 @@ pub(crate) fn encode_labels(values: &[&str]) -> (Vec<String>, Vec<f64>) {
     (labels, codes)
 }
 
-/// Kinds whose fit is not bit-identical across thread counts in anofox-ml
-/// 0.2 (parallel floating-point reductions); they always fit sequentially so
-/// results do not depend on DuckDB's `threads` (sipemu/anofox-ml#108).
-const SEQUENTIAL_KINDS: &[&str] = &["KMeans"];
-
 /// The process-wide pool fits run in, sized to the thread budget of the
 /// query (DuckDB's `threads`, or `anofox_ml_threads`). A DuckDB worker that
 /// finalizes a group blocks in `install` while the pool runs the fit, so
@@ -177,9 +172,9 @@ fn shared_pool(threads: usize) -> Result<std::sync::Arc<rayon::ThreadPool>, Stri
     Ok(pool)
 }
 
-/// Run a fit of `kind` with up to `threads` threads.
-fn run_fit<T: Send>(kind: &str, threads: usize, f: impl FnOnce() -> T + Send) -> Result<T, String> {
-    if threads <= 1 || SEQUENTIAL_KINDS.contains(&kind) {
+/// Run a fit with up to `threads` threads.
+fn run_fit<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> Result<T, String> {
+    if threads <= 1 {
         Ok(POOL.with(|p| p.install(f)))
     } else {
         Ok(shared_pool(threads)?.install(f))
@@ -313,7 +308,7 @@ fn fit_model(
         serde_json::from_str(params).map_err(|e| format!("invalid params JSON: {e}"))?
     };
     let mut model = anofox_ml_registry::make(kind, &params).map_err(|e| e.to_string())?;
-    run_fit(kind, threads, || model.fit(x, y, w))?.map_err(|e| e.to_string())?;
+    run_fit(threads, || model.fit(x, y, w))?.map_err(|e| e.to_string())?;
     Ok(model)
 }
 

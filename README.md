@@ -200,6 +200,7 @@ SELECT kind, default_params FROM ml_estimators();
 |---|---|
 | `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
 | `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `y` is `DOUBLE`, or `VARCHAR` class labels for classifiers. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
+| `ml_warm_start_agg(model, y, [x1, x2, …] [, params])` | Aggregate: continue training a stored boosting model (gradient boosting, HGB, LGBM) on the group's rows, after merging `params` (e.g. a larger `n_estimators`). On the same rows, 100 trees warm-started to 200 equal a 200-tree fit. Targets must be classes / labels the model knows |
 | `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |
 | `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
@@ -445,6 +446,15 @@ GROUP BY stage ORDER BY stage;
 SELECT store, ml_fit_with_validation_agg('HistGradientBoostingRegressor', units, [price, dow],
        day > max_day - 28, '{"n_estimators": 1000, "early_stopping": "Enabled"}') AS model
 FROM (SELECT *, max(day) OVER (PARTITION BY store) AS max_day FROM sales) GROUP BY store;
+```
+
+**Adding trees to a stored model.** Instead of refitting from scratch, continue boosting from the stored BLOB with this week's rows:
+
+```sql
+UPDATE models SET model = w.model
+FROM (SELECT store, ml_warm_start_agg(m.model, units, [price, dow], '{"n_estimators": 300}') AS model
+      FROM new_rows JOIN models m USING (store) GROUP BY store, m.model) w
+WHERE models.store = w.store;
 ```
 
 **Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:

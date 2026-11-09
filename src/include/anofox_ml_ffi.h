@@ -178,6 +178,13 @@ char *anofox_ml_fit_validation(const char *kind, const char *params, const doubl
                                const double *y, const char *const *y_labels, const double *w,
                                const uint8_t *validation, size_t threads, AnofoxMlBytes *out);
 
+// Continue training a fitted model on n_rows new rows (warm start of the
+// boosting kinds), after merging the JSON params; targets y (doubles), or
+// the model's string labels y_labels when y is NULL.
+char *anofox_ml_warm_start(const uint8_t *model, size_t model_len, const char *params, const double *x,
+                           size_t n_rows, size_t n_cols, const double *y, const char *const *y_labels, size_t threads,
+                           AnofoxMlBytes *out);
+
 // Whether `kind` fits on unlabelled rows (semi-supervised kinds): ml_fit_agg
 // then passes rows with a NULL target as y = -1, or as a NULL label.
 bool anofox_ml_accepts_unlabelled(const char *kind);

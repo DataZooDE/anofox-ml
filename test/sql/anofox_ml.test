@@ -513,3 +513,50 @@ statement error
 SELECT ml_fit_with_validation_agg('HistGradientBoostingRegressor', y, [a, b], false) FROM es;
 ----
 needs both training and validation rows
+
+# Warm start (anofox-ml 0.4): 100 trees + 100 more on the same rows equal a
+# 200-tree fit, for gradient boosting, HGB and LGBM.
+statement ok
+CREATE TABLE ws AS SELECT i, (hash(i) % 1000) / 100.0 AS a, (hash(i, 'b') % 1000) / 100.0 AS b,
+    sin((hash(i) % 1000) / 100.0) * 3 + (hash(i, 'b') % 1000) / 100.0 AS y FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE ws_models AS SELECT kind, ml_fit_agg(kind, y, [a, b], '{"n_estimators": 100}') AS m100,
+    ml_fit_agg(kind, y, [a, b], '{"n_estimators": 200}') AS m200
+FROM ws, (VALUES ('GradientBoostingRegressor'), ('HistGradientBoostingRegressor'), ('LgbmRegressor')) v(kind) GROUP BY kind;
+
+query III
+SELECT kind, len(ml_staged_predict(w, [1.0, 1.0])), max(abs(ml_predict(w, [a, b]) - ml_predict(m200, [a, b]))) < 1e-12
+FROM (SELECT kind, m200, ml_warm_start_agg(m100, y, [a, b], '{"n_estimators": 200}') AS w FROM ws_models, ws GROUP BY kind, m100, m200), ws
+GROUP BY ALL ORDER BY kind;
+----
+GradientBoostingRegressor	200	true
+HistGradientBoostingRegressor	200	true
+LgbmRegressor	200	true
+
+# string labels carry over; new rows must use the model's labels
+query I
+SELECT ml_model_info(ml_warm_start_agg(m, CASE WHEN y > 5 THEN 'hi' ELSE 'lo' END, [a, b], '{"n_estimators": 20}')).labels
+FROM (SELECT ml_fit_agg('GradientBoostingClassifier', CASE WHEN y > 5 THEN 'hi' ELSE 'lo' END, [a, b], '{"n_estimators": 10}') AS m FROM ws), ws GROUP BY m;
+----
+[hi, lo]
+
+statement error
+SELECT ml_warm_start_agg(m, 'zebra', [a, b]) FROM (SELECT ml_fit_agg('GradientBoostingClassifier', CASE WHEN y > 5 THEN 'hi' ELSE 'lo' END, [a, b], '{"n_estimators": 10}') AS m FROM ws), ws GROUP BY m;
+----
+not a label of the model
+
+statement error
+SELECT ml_warm_start_agg(m, y, [a, b]) FROM (SELECT ml_fit_agg('RandomForestRegressor', y, [a, b], '{"n_estimators": 5}') AS m FROM ws), ws GROUP BY m;
+----
+does not support warm_start
+
+statement error
+SELECT ml_warm_start_agg(m, y, [a]) FROM (SELECT ml_fit_agg('GradientBoostingRegressor', y, [a, b], '{"n_estimators": 5}') AS m FROM ws), ws GROUP BY m;
+----
+fitted on 2 features
+
+statement error
+SELECT ml_warm_start_agg(m, y, [a, b], '{"n_trees": 5}') FROM (SELECT ml_fit_agg('GradientBoostingRegressor', y, [a, b], '{"n_estimators": 5}') AS m FROM ws), ws GROUP BY m;
+----
+n_trees

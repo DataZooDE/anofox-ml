@@ -901,7 +901,12 @@ void ConformalDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
     }
 }
 
-template <bool LABELS>
+// Rows of (model, y, x [, options]) for one model per group; also used by
+// ml_warm_start_agg (options = params). FUNCTION names the aggregate in errors.
+constexpr char kConformalize[] = "ml_conformalize_agg";
+constexpr char kWarmStart[] = "ml_warm_start_agg";
+
+template <bool LABELS, const char *FUNCTION = kConformalize>
 void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
     UnifiedVectorFormat model_data, y_data, x_data, options_data, sdata;
     if (input_count > 3) {
@@ -939,9 +944,9 @@ void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, V
             }
         } else if (models[mi].GetSize() != s.model->size() ||
                    memcmp(models[mi].GetData(), s.model->data(), s.model->size()) != 0) {
-            throw InvalidInputException("ml_conformalize_agg: every row of a group must carry the same model");
+            throw InvalidInputException("%s: every row of a group must carry the same model", FUNCTION);
         } else if (entry.length != s.n_cols) {
-            throw InvalidInputException("ml_conformalize_agg: feature lists of different lengths");
+            throw InvalidInputException("%s: feature lists of different lengths", FUNCTION);
         }
         for (idx_t j = 0; j < entry.length; j++) {
             s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
@@ -955,6 +960,7 @@ void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, V
     }
 }
 
+template <const char *FUNCTION = kConformalize>
 void ConformalCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &, idx_t count) {
     auto sources = FlatVector::GetData<ConformalState *>(source_vector);
     auto targets = FlatVector::GetData<ConformalState *>(target_vector);
@@ -969,14 +975,45 @@ void ConformalCombine(Vector &source_vector, Vector &target_vector, AggregateInp
             *tgt.options = *src.options;
             tgt.n_cols = src.n_cols;
         } else if (*tgt.model != *src.model) {
-            throw InvalidInputException("ml_conformalize_agg: every row of a group must carry the same model");
+            throw InvalidInputException("%s: every row of a group must carry the same model", FUNCTION);
         } else if (tgt.n_cols != src.n_cols) {
-            throw InvalidInputException("ml_conformalize_agg: feature lists of different lengths");
+            throw InvalidInputException("%s: feature lists of different lengths", FUNCTION);
         }
         tgt.x->insert(tgt.x->end(), src.x->begin(), src.x->end());
         tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
         tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
         tgt.n_rows += src.n_rows;
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_warm_start_agg(model BLOB, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR]) -> BLOB
+// Continue training a boosting model on the group's rows.
+//===--------------------------------------------------------------------===//
+void WarmStartFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<ConformalState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_warm_start_agg");
+        AnofoxMlBytes blob {nullptr, 0};
+        std::vector<const char *> labels;
+        for (const auto &l : *s.labels) {
+            labels.push_back(l.c_str());
+        }
+        const bool has_labels = !s.labels->empty();
+        Check(anofox_ml_warm_start(reinterpret_cast<const uint8_t *>(s.model->data()), s.model->size(),
+                                   s.options->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                   has_labels ? nullptr : s.y->data(), has_labels ? labels.data() : nullptr,
+                                   FitThreads(aggr), &blob),
+              "ml_warm_start_agg");
+        FlatVector::GetData<string_t>(result)[row] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
+        anofox_ml_free_bytes(blob);
     }
 }
 
@@ -1401,12 +1438,30 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                             {LogicalType(LogicalTypeId::BLOB), LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
                              LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))},
                             LogicalType(LogicalTypeId::BLOB), AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
-                            labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine,
+                            labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine<>,
                             ConformalFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
                             ConformalDestroy);
         conformal_set.AddFunction(f);
     }
     loader.RegisterFunction(conformal_set);
+    AggregateFunctionSet warm_set("ml_warm_start_agg");
+    for (bool labels : {false, true}) {
+        for (bool params : {false, true}) {
+            vector<LogicalType> args {LogicalType(LogicalTypeId::BLOB),
+                                      LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
+                                      LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};
+            if (params) {
+                args.push_back(LogicalType(LogicalTypeId::VARCHAR));
+            }
+            AggregateFunction f("ml_warm_start_agg", args, LogicalType(LogicalTypeId::BLOB),
+                                AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
+                                labels ? ConformalUpdate<true, kWarmStart> : ConformalUpdate<false, kWarmStart>,
+                                ConformalCombine<kWarmStart>, WarmStartFinalize, FunctionNullHandling::SPECIAL_HANDLING,
+                                nullptr, FitBind, ConformalDestroy);
+            warm_set.AddFunction(f);
+        }
+    }
+    loader.RegisterFunction(warm_set);
 
     child_list_t<LogicalType> importance_fields;
     importance_fields.emplace_back("feature", LogicalType(LogicalTypeId::INTEGER));
@@ -1424,7 +1479,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
             }
             AggregateFunction f("ml_permutation_importance_agg", args, importance_type,
                                 AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
-                                labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine,
+                                labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine<>,
                                 ImportanceFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
                                 ConformalDestroy);
             importance_set.AddFunction(f);

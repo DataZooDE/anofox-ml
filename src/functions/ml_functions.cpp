@@ -1306,6 +1306,33 @@ void MlClusterCentersFunction(DataChunk &args, ExpressionState &, Vector &result
     });
 }
 
+LogicalType CovarianceType() {
+    const auto D = LogicalType(LogicalTypeId::DOUBLE);
+    child_list_t<LogicalType> fields;
+    fields.emplace_back("location", LogicalType::LIST(D));
+    fields.emplace_back("covariance", LogicalType::LIST(LogicalType::LIST(D)));
+    fields.emplace_back("precision", LogicalType::LIST(LogicalType::LIST(D)));
+    return LogicalType::STRUCT(std::move(fields));
+}
+
+// ml_covariance(model) -> STRUCT(location, covariance, precision) of a
+// covariance estimator (EmpiricalCovariance, LedoitWolf, MinCovDet, ...,
+// EllipticEnvelope).
+void MlCovarianceFunction(DataChunk &args, ExpressionState &, Vector &result) {
+    ModelValueFunction(args, result, [](string_t blob) {
+        std::vector<double> location, covariance, precision;
+        size_t lr = 0, lc = 0, cr = 0, cc = 0, pr = 0, pc = 0;
+        ModelArray("ml_covariance", blob, "location", false, location, lr, lc);
+        ModelArray("ml_covariance", blob, "covariance", false, covariance, cr, cc);
+        ModelArray("ml_covariance", blob, "precision", false, precision, pr, pc);
+        child_list_t<Value> fields;
+        fields.emplace_back("location", ListValue(location));
+        fields.emplace_back("covariance", MatrixValue(covariance, cr, cc));
+        fields.emplace_back("precision", MatrixValue(precision, pr, pc));
+        return Value::STRUCT(std::move(fields));
+    });
+}
+
 void MlFeatureImportancesFunction(DataChunk &args, ExpressionState &, Vector &result) {
     ModelValueFunction(args, result, [](string_t blob) {
         std::vector<double> data;
@@ -1420,6 +1447,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                                            MlExplainedVarianceRatioFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_feature_importances", {BL}, LogicalType::LIST(DL), MlFeatureImportancesFunction));
+    loader.RegisterFunction(ScalarFunction("ml_covariance", {BL}, CovarianceType(), MlCovarianceFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_model_fitted", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelFittedFunction));
     const vector<LogicalType> model_and_x {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};

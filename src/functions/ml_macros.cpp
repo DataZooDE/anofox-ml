@@ -118,8 +118,8 @@ unique_ptr<CreateMacroInfo> MakeTableMacro(const TableMacro &def) {
 
 } // anonymous namespace
 
-// Aggregate metrics of conformal prediction sets (ml_predict_set's VARCHAR[]).
-// A numeric y matches its label text as a number ("1" for 1.0).
+// Scalar macros. Set metrics aggregate ml_predict_set's VARCHAR[]; a numeric
+// y matches its label text as a number ("1" for 1.0).
 const DefaultMacro kScalarMacros[] = {
     {DEFAULT_SCHEMA,
      "ml_set_coverage",
@@ -129,6 +129,8 @@ const DefaultMacro kScalarMacros[] = {
      "WHEN list_contains(prediction_set, y::VARCHAR) OR coalesce(list_contains(list_transform(prediction_set, "
      "_e -> TRY_CAST(_e AS DOUBLE)), TRY_CAST(y AS DOUBLE)), false) THEN 1.0 ELSE 0.0 END)"},
     {DEFAULT_SCHEMA, "ml_mean_set_size", {"prediction_set", nullptr}, {{nullptr, nullptr}}, "avg(len(prediction_set))"},
+    // Squared Mahalanobis distance to a fitted covariance estimator.
+    {DEFAULT_SCHEMA, "ml_mahalanobis", {"model", "x", nullptr}, {{nullptr, nullptr}}, "ml_transform(model, x)[1]"},
 };
 
 void RegisterMlMacros(ExtensionLoader &loader) {

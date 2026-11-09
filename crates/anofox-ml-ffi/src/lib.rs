@@ -53,18 +53,23 @@ struct Meta {
     /// Categories of a `VARCHAR` encoder (no registry model behind it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     encoder: Option<encode::EncoderFit>,
+    /// Width of `Y` for the kinds fitted on `[X | Y]` (`y_columns`: Cca,
+    /// PLS, multi-output, multi-task); `n_features` is then the width of `X`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    y_columns: Option<usize>,
 }
 
 /// Cached decoded model: (BLOB hash, BLOB length, metadata, model).
 type CachedModel = Option<(u64, usize, Meta, Box<dyn DynModel>)>;
 
 /// Prediction methods callable through [`anofox_ml_apply`].
-const METHODS: [&str; 8] = [
+const METHODS: [&str; 9] = [
     "predict",
     "predict_proba",
     "predict_log_proba",
     "decision_function",
     "transform",
+    "transform_y",
     "inverse_transform",
     "score_samples",
     "staged_predict",
@@ -354,14 +359,25 @@ fn fit_model(
     w: Option<ArrayView1<f64>>,
     threads: usize,
 ) -> Result<Box<dyn DynModel>, String> {
+    let mut model = make_model(kind, params)?;
+    run_fit(threads, || model.fit(x, y, w))?.map_err(|e| e.to_string())?;
+    Ok(model)
+}
+
+/// An unfitted `kind` with the JSON `params` (empty: the defaults).
+fn make_model(kind: &str, params: &str) -> Result<Box<dyn DynModel>, String> {
     let params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
     } else {
         serde_json::from_str(params).map_err(|e| format!("invalid params JSON: {e}"))?
     };
-    let mut model = anofox_ml_registry::make(kind, &params).map_err(|e| e.to_string())?;
-    run_fit(threads, || model.fit(x, y, w))?.map_err(|e| e.to_string())?;
-    Ok(model)
+    anofox_ml_registry::make(kind, &params).map_err(|e| e.to_string())
+}
+
+/// `y_columns` of a kind fitted on `[X | Y]`, from its parameters.
+fn y_columns(model: &dyn DynModel) -> Option<usize> {
+    let v = model.params().ok()?.get("y_columns")?.as_u64()?;
+    Some(v as usize)
 }
 
 /// Run `method` of a fitted model on `x` (`labels` and `embedding`, which
@@ -387,6 +403,7 @@ fn run_method(
             }),
             "decision_function" => model.decision_function(x),
             "transform" => model.transform(x),
+            "transform_y" => model.transform_y(x),
             "inverse_transform" => model.inverse_transform(x),
             "score_samples" => model.score_samples(x),
             "staged_predict" => model.staged_predict(x),
@@ -425,7 +442,9 @@ fn fit_impl(
 }
 
 /// The BLOB of a fitted model: metadata (classes from the targets `y` of a
-/// model with `predict_proba`, string labels) and the registry bytes.
+/// model with `predict_proba`, string labels) and the registry bytes. For a
+/// kind fitted on `[X | Y]`, `n_features` (the fit's width) counts `Y` too
+/// and the stored width is that of `X`.
 fn encode_fitted(
     kind: &str,
     model: &dyn DynModel,
@@ -446,13 +465,15 @@ fn encode_fitted(
         }
         _ => None,
     };
+    let y_columns = y_columns(model);
     let meta = Meta {
         kind: kind.to_string(),
-        n_features,
+        n_features: n_features.saturating_sub(y_columns.unwrap_or(0)),
         classes,
         labels,
         conformity: None,
         encoder: None,
+        y_columns,
     };
     Ok(encode(&meta, &bytes))
 }
@@ -577,6 +598,118 @@ pub unsafe extern "C" fn anofox_ml_fit_validation(
         }
         Ok(Err(e)) => err(e),
         Err(_) => err("internal error (panic) while fitting"),
+    }
+}
+
+/// Fit with an offset on the link scale (`fit_with_offset`: the GLMs, e.g.
+/// `ln(exposure)` for a log link).
+fn fit_offset_impl<'a>(
+    kind: &str,
+    params: &str,
+    x: ArrayView2<'a, f64>,
+    y: ArrayView1<'a, f64>,
+    w: Option<ArrayView1<'a, f64>>,
+    offset: ArrayView1<'a, f64>,
+    threads: usize,
+) -> Result<Vec<u8>, String> {
+    let mut model = make_model(kind, params)?;
+    require_method(kind, model.as_ref(), "fit_with_offset")?;
+    run_fit(threads, || model.fit_with_offset(x, Some(y), w, offset))?
+        .map_err(|e| e.to_string())?;
+    encode_fitted(kind, model.as_ref(), x.ncols(), Some(y), None)
+}
+
+/// [`anofox_ml_fit`] with an `offset` per row on the link scale (the GLMs:
+/// `fit_with_offset`); `y` is required.
+///
+/// # Safety
+/// As [`anofox_ml_fit`]; `offset` holds `n_rows` doubles.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn anofox_ml_fit_offset(
+    kind: *const c_char,
+    params: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    y: *const f64,
+    w: *const f64,
+    offset: *const f64,
+    threads: usize,
+    out: *mut AnofoxMlBytes,
+) -> *mut c_char {
+    let run = || -> Result<Vec<u8>, String> {
+        let kind = str_arg(kind, "kind")?;
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let x = matrix(x, n_rows, n_cols)?;
+        if y.is_null() || offset.is_null() {
+            return Err("targets and offsets are required".into());
+        }
+        let y = ArrayView1::from(std::slice::from_raw_parts(y, n_rows));
+        let offset = ArrayView1::from(std::slice::from_raw_parts(offset, n_rows));
+        let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
+        fit_offset_impl(kind, params, x, y, w, offset, threads)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            *out = AnofoxMlBytes {
+                data: b.as_mut_ptr(),
+                len: b.len(),
+            };
+            std::mem::forget(b);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while fitting"),
+    }
+}
+
+/// Predict `n_rows` rows of `x` with an `offset` per row on the link scale
+/// (`predict_with_offset`: the GLMs); `out` receives `n_rows` doubles.
+///
+/// # Safety
+/// As [`anofox_ml_predict`]; `offset` holds `n_rows` doubles.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_predict_offset(
+    model: *const u8,
+    model_len: usize,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    offset: *const f64,
+    out: *mut AnofoxMlDoubles,
+) -> *mut c_char {
+    let run = || -> Result<Vec<f64>, String> {
+        if model.is_null() || offset.is_null() {
+            return Err("model or offset is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        let x = matrix(x, n_rows, n_cols)?;
+        let offset = ArrayView1::from(std::slice::from_raw_parts(offset, n_rows));
+        with_model(blob, |meta, model| {
+            require_method(&meta.kind, model, "predict_with_offset")?;
+            check_width(meta, x)?;
+            let out = POOL
+                .with(|p| p.install(|| model.predict_with_offset(x, offset)))
+                .map_err(|e| e.to_string())?;
+            match flatten(out) {
+                (v, 1) => Ok(v),
+                (_, cols) => Err(format!("predict_with_offset returned {cols} columns")),
+            }
+        })
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(v)) => {
+            *out = into_doubles(v);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while predicting"),
     }
 }
 
@@ -1124,16 +1257,32 @@ fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>
     }
     with_model(blob, |meta, model| {
         require_method(&meta.kind, model, method)?;
-        if x.ncols() != meta.n_features {
-            return Err(format!(
-                "{} was fitted on {} features, got {}",
-                meta.kind,
-                meta.n_features,
-                x.ncols()
-            ));
+        match (method, meta.y_columns) {
+            ("transform_y", Some(cols)) if x.ncols() != cols => {
+                return Err(format!(
+                    "{} was fitted on {cols} Y columns, got {}",
+                    meta.kind,
+                    x.ncols()
+                ))
+            }
+            ("transform_y", _) => {}
+            _ => check_width(meta, x)?,
         }
         run_method(model, method, x)
     })
+}
+
+/// `Ok` when `x` has the width the model was fitted on.
+fn check_width(meta: &Meta, x: ArrayView2<f64>) -> Result<(), String> {
+    if x.ncols() != meta.n_features {
+        return Err(format!(
+            "{} was fitted on {} features, got {}",
+            meta.kind,
+            meta.n_features,
+            x.ncols()
+        ));
+    }
+    Ok(())
 }
 
 /// Apply `method` (`predict`, `predict_proba`, `decision_function`,
@@ -2020,6 +2169,7 @@ mod tests {
             labels: None,
             conformity: None,
             encoder: None,
+            y_columns: None,
         };
         assert_eq!(label_of(&meta, 1.0).unwrap(), "1");
         assert_eq!(label_of(&meta, -2.5).unwrap(), "-2.5");

@@ -157,6 +157,7 @@ struct FitState {
     bool string_x;
     std::string *options; // ml_tune_agg options
     std::vector<uint8_t> *val; // per used row: 1 = validation row (ml_fit_with_validation_agg)
+    std::vector<double> *off;  // per used row: offset on the link scale (ml_fit_with_offset_agg)
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -181,6 +182,7 @@ void FitInitialize(FitState &s) {
     s.options = new std::string();
     s.used = new std::vector<uint8_t>();
     s.val = new std::vector<uint8_t>();
+    s.off = new std::vector<double>();
 }
 
 void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
@@ -198,6 +200,7 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.options;
         delete s.used;
         delete s.val;
+        delete s.off;
     }
 }
 
@@ -256,19 +259,20 @@ void CheckFitSize(const AggregateInputData &aggr, idx_t n_values) {
 // Inputs: kind, [y,] x [, params [, weight]]; y is a string label when LABELS.
 // With UNLABELLED, a NULL y of a semi-supervised kind is kept as an
 // unlabelled row (y = -1, or a NULL label) instead of skipping the row.
-// With HAS_VAL, a BOOLEAN validation flag follows x (rows with a NULL flag
-// are skipped).
-template <bool HAS_Y, bool HAS_W = false, bool LABELS = false, bool UNLABELLED = true, bool HAS_VAL = false>
+// With HAS_VAL, a BOOLEAN validation flag follows x; with HAS_OFF, a DOUBLE
+// offset (rows with a NULL flag or offset are skipped).
+template <bool HAS_Y, bool HAS_W = false, bool LABELS = false, bool UNLABELLED = true, bool HAS_VAL = false,
+          bool HAS_OFF = false>
 void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
-    constexpr idx_t P = X + 1 + (HAS_VAL ? 1 : 0); // params, then weight
+    constexpr idx_t P = X + 1 + (HAS_VAL || HAS_OFF ? 1 : 0); // params, then weight
     UnifiedVectorFormat kind_data, y_data, x_data, val_data, params_data, w_data, sdata;
     inputs[0].ToUnifiedFormat(count, kind_data);
     if (HAS_Y) {
         inputs[1].ToUnifiedFormat(count, y_data);
     }
     inputs[X].ToUnifiedFormat(count, x_data);
-    if (HAS_VAL) {
+    if (HAS_VAL || HAS_OFF) {
         inputs[X + 1].ToUnifiedFormat(count, val_data);
     }
     const bool has_params = input_count > P;
@@ -294,12 +298,12 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         auto yi = HAS_Y ? y_data.sel->get_index(i) : 0;
         auto xi = x_data.sel->get_index(i);
         auto wi = HAS_W ? w_data.sel->get_index(i) : 0;
-        auto vi = HAS_VAL ? val_data.sel->get_index(i) : 0;
+        auto vi = HAS_VAL || HAS_OFF ? val_data.sel->get_index(i) : 0;
         const bool no_y = HAS_Y && !y_data.validity.RowIsValid(yi);
         const bool unlabelled = UNLABELLED && no_y && kind_data.validity.RowIsValid(ki) &&
                                 anofox_ml_accepts_unlabelled(kinds[ki].GetString().c_str());
         if (!kind_data.validity.RowIsValid(ki) || (no_y && !unlabelled) || !x_data.validity.RowIsValid(xi) ||
-            (HAS_W && !w_data.validity.RowIsValid(wi)) || (HAS_VAL && !val_data.validity.RowIsValid(vi))) {
+            (HAS_W && !w_data.validity.RowIsValid(wi)) || ((HAS_VAL || HAS_OFF) && !val_data.validity.RowIsValid(vi))) {
             s.used->push_back(0); // rows with a NULL kind, target, feature list or weight are skipped
             continue;
         }
@@ -341,6 +345,9 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         }
         if (HAS_VAL) {
             s.val->push_back(UnifiedVectorFormat::GetData<bool>(val_data)[vi] ? 1 : 0);
+        }
+        if (HAS_OFF) {
+            s.off->push_back(UnifiedVectorFormat::GetData<double>(val_data)[vi]);
         }
         s.n_rows++;
         s.used->push_back(1);
@@ -430,6 +437,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
         tgt.unlabelled->insert(tgt.unlabelled->end(), src.unlabelled->begin(), src.unlabelled->end());
         tgt.val->insert(tgt.val->end(), src.val->begin(), src.val->end());
+        tgt.off->insert(tgt.off->end(), src.off->begin(), src.off->end());
         tgt.sx->insert(tgt.sx->end(), src.sx->begin(), src.sx->end());
         tgt.n_rows += src.n_rows;
         CheckFitSize(aggr, tgt.x->size() + tgt.sx->size());
@@ -501,6 +509,32 @@ void FitValidationFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Ve
                                        s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
                                        s.has_w ? s.w->data() : nullptr, s.val->data(), FitThreads(aggr), &blob),
               "ml_fit_with_validation_agg");
+        compat::FlatData<string_t>(result)[row] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
+        anofox_ml_free_bytes(blob);
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_fit_with_offset_agg(kind VARCHAR, y DOUBLE, x DOUBLE[], offset DOUBLE [, params VARCHAR [, weight DOUBLE]])
+//   -> BLOB
+// GLM fit with an offset on the link scale (e.g. ln(exposure)).
+//===--------------------------------------------------------------------===//
+void FitOffsetFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count,
+                       idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_fit_with_offset_agg");
+        AnofoxMlBytes blob {nullptr, 0};
+        Check(anofox_ml_fit_offset(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols, s.y->data(),
+                                   s.has_w ? s.w->data() : nullptr, s.off->data(), FitThreads(aggr), &blob),
+              "ml_fit_with_offset_agg");
         compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
@@ -1310,6 +1344,44 @@ void MlPredictFunction(DataChunk &args, ExpressionState &state, Vector &result) 
 }
 
 //===--------------------------------------------------------------------===//
+// ml_predict(model BLOB, x DOUBLE[], offset DOUBLE) -> DOUBLE
+// GLM predictions with an offset on the link scale; a NULL offset gives NULL.
+//===--------------------------------------------------------------------===//
+void MlPredictOffsetFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto out = compat::FlatData<double>(result);
+    UnifiedVectorFormat off_data;
+    args.data[2].ToUnifiedFormat(args.size(), off_data);
+    auto offsets = UnifiedVectorFormat::GetData<double>(off_data);
+    ApplyBatchedWith(args, "ml_predict", result,
+                     [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+                         std::vector<idx_t> run;
+                         std::vector<double> rx, off;
+                         for (idx_t r = 0; r < rows.size(); r++) {
+                             auto oi = off_data.sel->get_index(rows[r]);
+                             if (!off_data.validity.RowIsValid(oi)) {
+                                 FlatVector::SetNull(result, rows[r], true);
+                                 continue;
+                             }
+                             run.push_back(rows[r]);
+                             rx.insert(rx.end(), x.begin() + r * n_cols, x.begin() + (r + 1) * n_cols);
+                             off.push_back(offsets[oi]);
+                         }
+                         if (run.empty()) {
+                             return;
+                         }
+                         AnofoxMlDoubles o {nullptr, 0};
+                         Check(anofox_ml_predict_offset(reinterpret_cast<const uint8_t *>(model.GetData()),
+                                                        model.GetSize(), rx.data(), run.size(), n_cols, off.data(),
+                                                        &o),
+                               "ml_predict");
+                         for (idx_t r = 0; r < run.size(); r++) {
+                             out[run[r]] = o.data[r];
+                         }
+                         anofox_ml_free_doubles(o);
+                     });
+}
+
+//===--------------------------------------------------------------------===//
 // ml_predict_proba / ml_decision_function / ml_transform /
 // ml_inverse_transform / ml_score_samples (model BLOB, x DOUBLE[]) -> DOUBLE[]
 //===--------------------------------------------------------------------===//
@@ -1589,7 +1661,13 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(Fallible(ScalarFunction("ml_covariance", {BL}, CovarianceType(), MlCovarianceFunction)));
     loader.RegisterFunction(Fallible(ScalarFunction("ml_model_fitted", {BL}, VL, MlModelFittedFunction)));
     const vector<LogicalType> model_and_x {BL, LogicalType::LIST(DL)};
-    loader.RegisterFunction(Fallible(ScalarFunction("ml_predict", model_and_x, DL, MlPredictFunction)));
+    {
+        ScalarFunctionSet predict_set("ml_predict");
+        predict_set.AddFunction(Fallible(ScalarFunction(model_and_x, DL, MlPredictFunction)));
+        predict_set.AddFunction(
+            Fallible(ScalarFunction({BL, LogicalType::LIST(DL), DL}, DL, MlPredictOffsetFunction)));
+        loader.RegisterFunction(predict_set);
+    }
     loader.RegisterFunction(Fallible(ScalarFunction("ml_predict_label", model_and_x, VL, MlPredictLabelFunction)));
     const vector<LogicalType> model_x_alpha {BL, LogicalType::LIST(DL), DL};
     loader.RegisterFunction(
@@ -1677,6 +1755,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
 {"ml_predict_log_proba", "predict_log_proba"}, {"ml_inverse_transform", "inverse_transform"},
+        {"ml_transform_y", "transform_y"},
         {"ml_score_samples", "score_samples"}, {"ml_staged_predict", "staged_predict"},
     };
     for (const auto &f : list_functions) {
@@ -1768,6 +1847,19 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     validation_set.AddFunction(make_validation({V, V, features, B, V}, FitUpdate<true, false, true, false, true>));
     validation_set.AddFunction(make_validation({V, V, features, B, V, D}, FitUpdate<true, true, true, false, true>));
     loader.RegisterFunction(validation_set);
+
+    AggregateFunctionSet offset_set("ml_fit_with_offset_agg");
+    auto make_offset = [](vector<LogicalType> args, aggregate_update_t update) {
+        AggregateFunction f("ml_fit_with_offset_agg", std::move(args), LogicalType(LogicalTypeId::BLOB),
+                            AggregateFunction::StateSize<FitState>, compat::StateInit<FitInitialize>, update,
+                            FitCombine, FitOffsetFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+        f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+        return f;
+    };
+    offset_set.AddFunction(make_offset({V, D, features, D}, FitUpdate<true, false, false, false, false, true>));
+    offset_set.AddFunction(make_offset({V, D, features, D, V}, FitUpdate<true, false, false, false, false, true>));
+    offset_set.AddFunction(make_offset({V, D, features, D, V, D}, FitUpdate<true, true, false, false, false, true>));
+    loader.RegisterFunction(offset_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;
     auto make_rows = [&](const char *name, LogicalType result, aggregate_finalize_t finalize,

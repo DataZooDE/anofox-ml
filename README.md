@@ -203,13 +203,16 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_warm_start_agg(model, y, [x1, x2, …] [, params])` | Aggregate: continue training a stored model on the group's rows: more boosting stages (gradient boosting, HGB, LGBM; raise `n_estimators` in `params`) or more MLP epochs. On the same rows, 100 trees warm-started to 200 equal a 200-tree fit. Targets must be classes / labels the model knows |
 | `ml_partial_fit_agg(model, [y,] [x1, x2, …] [, params])` | Aggregate: fold the group's rows into a stored model as one more batch (`partial_fit`). Works for the naive Bayes kinds, SGD, PassiveAggressive and MLP models, and without `y` for StandardScaler, MinMaxScaler, MaxAbsScaler and IncrementalPca. For naive Bayes and the scalers, batches give the same model as one fit. Classes are fixed by the first fit |
 | `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |
-| `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
+| `ml_fit_with_offset_agg(kind, y, [x1, x2, …], offset [, params [, weight]])` | `ml_fit_agg` for the GLMs with an offset per row on the link scale, e.g. `ln(exposure)` for counts: `PoissonRegressor`, `GammaRegressor`, `TweedieRegressor` and `BinomialRegressor` (proportions `y`, trial counts as `weight`). Rows with a NULL offset are skipped |
+| `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …), and for the kinds fitted on `[X \| Y]` with `y_columns` (`Cca`, `PlsCanonical`, `PlsSvd`): pass `list_concat(x, y)`; the model then takes `X` alone |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
+| `ml_predict(model, [x1, x2, …], offset)` | GLM prediction with an offset on the link scale (a model from `ml_fit_with_offset_agg`); `ml_predict(model, x)` predicts at offset 0 |
 | `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
 | `ml_predict_log_proba(model, [x1, x2, …])` | `ln` of the class probabilities (`DOUBLE[]`) |
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
 | `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`); `ml_transform(encoder, [VARCHAR, …])` for the categorical encoders |
+| `ml_transform_y(model, [y1, y2, …])` | Scores of the second block (`DOUBLE[]`) of `Cca`, `PlsCanonical` and `PlsSvd`, whose `ml_transform` gives the X scores |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
 | `ml_staged_predict(model, [x1, x2, …])` | Boosting kinds (gradient boosting, HGB, LGBM): the prediction after each stage (`DOUBLE[]`; the class or label index per stage for classifiers). The last entry equals `ml_predict` |
 | `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
@@ -489,6 +492,29 @@ SELECT ml_rfe_agg('OlsRegressor', y, [x1, x2, x3, x4, x5], '{}', '{"n_features_t
 -- SelectFromModel(threshold="mean")
 SELECT list_filter(range(1, len(fi) + 1), lambda j: fi[j] >= list_avg(fi)) AS selected
 FROM (SELECT ml_feature_importances(ml_fit_agg('RandomForestRegressor', y, [x1, x2, x3, x4, x5])) AS fi FROM train);
+```
+
+**Feature selection kinds.** `Rfe`, `Rfecv` and `SequentialFeatureSelector` are estimator kinds with a nested `estimator` / `estimator_params`, matching scikit-learn. `ml_transform` keeps the selected columns, the support mask (and `ranking`; `Rfecv` also the CV scores) is in `ml_model_fitted`, and `Rfe` / `Rfecv` predict with the estimator refitted on the selection. `Rfecv` picks the number of features by CV; `SequentialFeatureSelector` adds (`"direction": "forward"`) or drops features greedily by CV score:
+
+```sql
+WITH s AS (SELECT ml_fit_agg('Rfecv', y, [x1, x2, x3, x4], '{"estimator": "RandomForestRegressor", "cv": 5}') AS sel FROM train)
+SELECT ml_transform(sel, [x1, x2, x3, x4]) AS selected, ml_predict(sel, [x1, x2, x3, x4]) FROM test, s;
+```
+
+**Exposure and offsets.** Counts observed over different exposures (time at risk, policy years) are modelled as a rate with `ln(exposure)` as the offset; predict the expected count for a given exposure, or the rate with `ml_predict(model, x)`:
+
+```sql
+WITH m AS (SELECT ml_fit_with_offset_agg('PoissonRegressor', claims, [age, region_code], ln(policy_years), '{"alpha": 0}') AS model FROM policies)
+SELECT ml_predict(model, [age, region_code], ln(policy_years)) AS expected_claims,
+       ml_predict(model, [age, region_code]) AS claims_per_year
+FROM new_policies, m;
+```
+
+**Canonical correlation.** `Cca` (and `PlsCanonical`, `PlsSvd`) fit on both blocks at once: concatenate X and Y and give the width of Y as `y_columns`. `ml_transform` scores the X block, `ml_transform_y` the Y block:
+
+```sql
+WITH m AS (SELECT ml_fit_agg('Cca', [x1, x2, x3, y1, y2], '{"n_components": 2, "y_columns": 2}') AS cca FROM t)
+SELECT ml_transform(cca, [x1, x2, x3]) AS x_scores, ml_transform_y(cca, [y1, y2]) AS y_scores FROM t, m;
 ```
 
 **Multivariate drift.** `ml_domain_classifier_drift_by` flags chunks whose rows a classifier can tell apart from a reference chunk. To see which features drift, fit the same classifier on reference + chunk and read its importances:

@@ -580,6 +580,65 @@ pub unsafe extern "C" fn anofox_ml_fit_validation(
     }
 }
 
+/// The `k` nearest training rows of every row of `x` (the kNN kinds;
+/// `k = 0`: the model's `n_neighbors`): `dist` and `idx` receive
+/// `n_rows * k_out` values each, row-major, nearest first; `idx` holds
+/// 0-based training-row positions.
+///
+/// # Safety
+/// As [`anofox_ml_predict`]; `dist`, `idx` and `k_out` are writable.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn anofox_ml_kneighbors(
+    model: *const u8,
+    model_len: usize,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    k: usize,
+    dist: *mut AnofoxMlDoubles,
+    idx: *mut AnofoxMlDoubles,
+    k_out: *mut usize,
+) -> *mut c_char {
+    let run = || -> Result<(Vec<f64>, Vec<f64>, usize), String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        let x = matrix(x, n_rows, n_cols)?;
+        with_model(blob, |meta, model| {
+            require_method(&meta.kind, model, "kneighbors")?;
+            if x.ncols() != meta.n_features {
+                return Err(format!(
+                    "{} was fitted on {} features, got {}",
+                    meta.kind,
+                    meta.n_features,
+                    x.ncols()
+                ));
+            }
+            let (d, i) = POOL
+                .with(|p| p.install(|| model.kneighbors(x, (k > 0).then_some(k))))
+                .map_err(|e| e.to_string())?;
+            let cols = d.ncols();
+            Ok((
+                d.as_standard_layout().iter().copied().collect(),
+                i.as_standard_layout().iter().map(|&v| v as f64).collect(),
+                cols,
+            ))
+        })
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok((d, i, cols))) => {
+            *dist = into_doubles(d);
+            *idx = into_doubles(i);
+            *k_out = cols;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while searching neighbours"),
+    }
+}
+
 /// Continue training a fitted model BLOB on new rows (`DynModel::warm_start`),
 /// after merging the JSON `params` (e.g. a larger `n_estimators`); targets
 /// are numbers, or the model's string labels in `labels`.

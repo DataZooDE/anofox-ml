@@ -899,6 +899,58 @@ void MlPredictIntervalFunction(DataChunk &args, ExpressionState &state, Vector &
         });
 }
 
+//===--------------------------------------------------------------------===//
+// ml_kneighbors(model BLOB, x DOUBLE[] [, k]) -> STRUCT(indices BIGINT[], distances DOUBLE[])
+// The k nearest training rows (0-based positions in the fit's input order).
+//===--------------------------------------------------------------------===//
+LogicalType NeighborsType() {
+    child_list_t<LogicalType> fields;
+    fields.emplace_back("indices", LogicalType::LIST(LogicalType(LogicalTypeId::BIGINT)));
+    fields.emplace_back("distances", LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)));
+    return LogicalType::STRUCT(std::move(fields));
+}
+
+void MlKneighborsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    std::vector<std::pair<idx_t, Value>> rows_out;
+    auto search = [&](string_t model, std::vector<idx_t> &run, std::vector<double> &rx, idx_t n_cols, double k) {
+        if (k < 0 || k != std::floor(k)) {
+            throw InvalidInputException("ml_kneighbors: k must be a non-negative integer, got %g", k);
+        }
+        AnofoxMlDoubles dist {nullptr, 0}, idx {nullptr, 0};
+        size_t kk = 0;
+        Check(anofox_ml_kneighbors(reinterpret_cast<const uint8_t *>(model.GetData()), model.GetSize(), rx.data(),
+                                   run.size(), n_cols, static_cast<size_t>(k), &dist, &idx, &kk),
+              "ml_kneighbors");
+        for (idx_t r = 0; r < run.size(); r++) {
+            vector<Value> indices, distances;
+            for (size_t j = 0; j < kk; j++) {
+                indices.push_back(Value::BIGINT(static_cast<int64_t>(idx.data[r * kk + j])));
+                distances.push_back(Value::DOUBLE(dist.data[r * kk + j]));
+            }
+            child_list_t<Value> fields;
+            fields.emplace_back("indices", Value::LIST(LogicalType(LogicalTypeId::BIGINT), std::move(indices)));
+            fields.emplace_back("distances", Value::LIST(LogicalType(LogicalTypeId::DOUBLE), std::move(distances)));
+            rows_out.emplace_back(run[r], Value::STRUCT(std::move(fields)));
+        }
+        anofox_ml_free_doubles(dist);
+        anofox_ml_free_doubles(idx);
+    };
+    ApplyBatchedWith(args, "ml_kneighbors", result,
+                     [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+                         if (args.ColumnCount() < 3) {
+                             search(model, rows, x, n_cols, 0);
+                             return;
+                         }
+                         ByAlpha(args, result, rows, x, n_cols,
+                                 [&](std::vector<idx_t> &run, std::vector<double> &rx, double k) {
+                                     search(model, run, rx, n_cols, k);
+                                 });
+                     });
+    for (auto &row : rows_out) {
+        result.SetValue(row.first, row.second);
+    }
+}
+
 void MlPredictSetFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     // Collect per row first: the list child vector is appended to in row order.
     std::vector<std::pair<idx_t, std::vector<std::string>>> sets;
@@ -1508,6 +1560,14 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const auto BL = LogicalType(LogicalTypeId::BLOB), DL = LogicalType(LogicalTypeId::DOUBLE);
     const auto VL = LogicalType(LogicalTypeId::VARCHAR);
     loader.RegisterFunction(Fallible(ScalarFunction("ml_model_kind", {BL}, VL, MlModelKindFunction)));
+    {
+        ScalarFunctionSet kn("ml_kneighbors");
+        const auto XL = LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE));
+        kn.AddFunction(Fallible(ScalarFunction({BL, XL}, NeighborsType(), MlKneighborsFunction)));
+        kn.AddFunction(Fallible(ScalarFunction({BL, XL, LogicalType(LogicalTypeId::DOUBLE)}, NeighborsType(),
+                                               MlKneighborsFunction)));
+        loader.RegisterFunction(kn);
+    }
     loader.RegisterFunction(Fallible(ScalarFunction("ml_model_info", {BL}, ModelInfoType(), MlModelInfoFunction)));
     loader.RegisterFunction(
         Fallible(ScalarFunction("ml_coefficients", {BL}, CoefficientsType(), MlCoefficientsFunction)));

@@ -68,6 +68,27 @@ FROM _d JOIN _m ON _d._g IS NOT DISTINCT FROM _m._g AND _d._split = _m._split
 WHERE _d._role = 'test'
 )";
 
+// Domain-classifier drift (evidently's "model" method, NannyML's domain
+// classifier): per chunk, a classifier learns to tell the chunk's rows from
+// the reference chunk's; its out-of-fold ROC AUC is about 0.5 without drift.
+const char *kDomainClassifierDrift = R"(
+WITH _s AS (SELECT chunk_col AS _k, id_col AS _id, x_cols AS _x FROM query_table(source::VARCHAR)),
+_c AS (SELECT DISTINCT _k AS _chunk FROM _s WHERE _k IS DISTINCT FROM reference),
+_d AS (SELECT c._chunk, s._id, s._x, CASE WHEN s._k IS NOT DISTINCT FROM c._chunk THEN 1.0 ELSE 0.0 END AS _y
+       FROM _c c JOIN _s s ON s._k IS NOT DISTINCT FROM c._chunk OR s._k IS NOT DISTINCT FROM reference),
+_f AS (SELECT _chunk, unnest(ml_cv_splits_agg(_id, 'stratified_kfold', printf('{"n_splits": %d, "seed": %d}', folds, seed),
+                                               _y ORDER BY _id)) AS _sp
+       FROM _d GROUP BY _chunk),
+_j AS (SELECT _d.*, _f._sp.split AS _split, _f._sp.role AS _role
+       FROM _d JOIN _f ON _d._chunk IS NOT DISTINCT FROM _f._chunk AND _d._id = _f._sp.id),
+_m AS (SELECT _chunk, _split, ml_fit_agg(kind, _y, _x, params) AS _model FROM _j WHERE _role = 'train' GROUP BY ALL),
+_p AS (SELECT _j._chunk, _j._y, ml_predict_proba(_m._model, _j._x)[2] AS _p
+       FROM _j JOIN _m ON _j._chunk IS NOT DISTINCT FROM _m._chunk AND _j._split = _m._split WHERE _j._role = 'test')
+SELECT _chunk AS chunk, count(*) FILTER (WHERE _y = 0) AS n_reference, count(*) FILTER (WHERE _y = 1) AS n_rows,
+       ml_roc_auc(_y, _p) AS auc, threshold::DOUBLE AS threshold, ml_roc_auc(_y, _p) > threshold AS drifted
+FROM _p GROUP BY _chunk ORDER BY _chunk
+)";
+
 const TableMacro kMacros[] = {
     {"ml_fit_predict_by", {"source", "group_col", "y_col", "x_cols", "kind"}, {{"params", "'{}'"}}, kFitPredict},
     {"ml_fit_predict_proba_by",
@@ -90,6 +111,10 @@ const TableMacro kMacros[] = {
      {"source", "group_col", "id_col", "y_col", "x_cols", "kind"},
      {{"params", "'{}'"}, {"method", "'kfold'"}, {"options", "'{}'"}},
      kCrossValPredict},
+    {"ml_domain_classifier_drift_by",
+     {"source", "chunk_col", "id_col", "x_cols", "reference"},
+     {{"kind", "'HistGradientBoostingClassifier'"}, {"params", "'{}'"}, {"folds", "5"}, {"threshold", "0.55"}, {"seed", "0"}},
+     kDomainClassifierDrift},
 };
 
 unique_ptr<CreateMacroInfo> MakeTableMacro(const TableMacro &def) {

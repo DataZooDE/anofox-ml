@@ -98,3 +98,21 @@ statement error
 FROM ml_cluster_by('sales', id, id, [dow, price], 'KMeans', params := '{"n_clusters": 3}');
 ----
 ml_cluster_agg
+
+# Domain-classifier drift: week w2 is shifted in `a`, w1 is not
+statement ok
+CREATE TABLE obs AS SELECT i AS id, 'w' || (i // 300) AS week,
+    (hash(i) % 1000) / 100.0 + CASE WHEN i // 300 = 2 THEN 3 ELSE 0 END AS a, (hash(i, 'b') % 1000) / 100.0 AS b
+FROM range(900) t(i);
+
+query IIIIII
+SELECT chunk, n_reference, n_rows, auc BETWEEN 0.4 AND 0.6, threshold, drifted FROM ml_domain_classifier_drift_by('obs', week, id, [a, b], 'w0');
+----
+w1	300	300	true	0.55	false
+w2	300	300	false	0.55	true
+
+query III
+SELECT chunk, auc > 0.65, drifted FROM ml_domain_classifier_drift_by('obs', week, id, [a, b], 'w0', kind := 'LogisticRegressor', folds := 3, threshold := 0.6);
+----
+w1	false	false
+w2	true	true

@@ -71,7 +71,7 @@ The extension is not published as a DuckDB community extension yet; that is on h
 
 ### From a GitHub Release
 
-Every [release](https://github.com/DataZooDE/anofox-ml/releases) has a zip per platform (Linux, macOS and Windows; amd64 / arm64), built for one DuckDB version, which is named in the file, e.g. `anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip`. The extension loads only into that DuckDB version. Unzip it and keep the file name `anofox_ml.duckdb_extension`, because DuckDB derives the entry point from the name. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
+Every [release](https://github.com/DataZooDE/anofox-ml/releases) has a zip per platform (Linux, macOS and Windows; amd64 / arm64) and DuckDB version, since DuckDB v1.5.6 and v2.0.0 are both supported. The DuckDB version is part of the file name, e.g. `anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip` or `…-duckdb-v2.0.0-linux_amd64.zip`. A binary loads only into the DuckDB version it was built for. Unzip it and keep the file name `anofox_ml.duckdb_extension`, because DuckDB derives the entry point from the name. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
 
 ```bash
 unzip anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip
@@ -98,7 +98,7 @@ GEN=ninja make release       # or: make release -j$(nproc)
 # and build/release/duckdb starts a shell with it already loaded.
 ```
 
-The `duckdb` submodule is pinned to v1.5.6, so a source build targets DuckDB v1.5.6.
+The `duckdb` submodule is pinned to v1.5.6, so a source build targets DuckDB v1.5.6. The same source builds against DuckDB 2.0 (the differences live in `src/include/duckdb_compat.hpp`). For a 2.0 build, check out `duckdb` at `v2.0.0` and `extension-ci-tools` at `v2.0-cyanoptera`; CI builds and tests both.
 
 ## 🚀 Quick Start
 

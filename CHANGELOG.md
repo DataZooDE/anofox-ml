@@ -7,6 +7,7 @@
 - `ml_predict_interval` / `ml_predict_set` for the conformal kinds: split, CV+ / jackknife+, normalised, CQR, Mondrian and classifier sets (#6). New aggregates `ml_set_coverage`, `ml_mean_set_size` and `ml_mean_pinball_loss`.
 - Tests that model BLOBs saved with anofox-ml 0.2 still load and predict the same (#48).
 - `ml_staged_predict(model, x)` for the boosting kinds and `ml_fit_with_validation_agg` for early stopping on an explicit validation set (#46).
+- `ml_warm_start_agg(model, y, x [, params])`: continue training a stored gradient-boosting / HGB / LGBM model (#17).
 - Semi-supervised fits: for `LabelPropagation`, `LabelSpreading` and `SelfTrainingClassifier`, rows with a NULL target are unlabelled rows of the fit instead of being skipped (#44).
 
 ## [0.1.0] - 2026-11-08

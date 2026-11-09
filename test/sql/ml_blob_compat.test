@@ -1,0 +1,55 @@
+# name: test/sql/ml_blob_compat.test
+# description: model BLOBs saved by older versions still load and predict the same
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# anofox-ml 0.2 (extension at 99f00f0); see test/data/blobs/README.md
+statement ok
+CREATE TABLE fm AS SELECT "case" AS c, kind, method, unhex(blob_hex) AS model
+FROM read_csv('test/data/blobs/models_v0.2.csv', all_varchar = true);
+
+statement ok
+CREATE TABLE fe AS SELECT "case" AS c, "row"::INT AS r, x::DOUBLE[] AS x, expected::DOUBLE[] AS e
+FROM read_csv('test/data/blobs/expected_v0.2.csv', all_varchar = true);
+
+query I
+SELECT count(*) FROM fm;
+----
+9
+
+# every model reproduces its stored output
+query III
+SELECT c, count(*), max(list_max(list_transform(list_zip(got, e), lambda p: abs(p[1] - p[2])))) < 1e-12 FROM (
+    SELECT c, e, CASE method
+        WHEN 'predict' THEN [ml_predict(model, x)]
+        WHEN 'predict_proba' THEN ml_predict_proba(model, x)
+        WHEN 'transform' THEN ml_transform(model, x)
+        WHEN 'score_samples' THEN ml_score_samples(model, x) END AS got
+    FROM fm JOIN fe USING (c))
+GROUP BY c ORDER BY c;
+----
+gnb	4	true
+hgb	4	true
+iforest	4	true
+kmeans	4	true
+logistic_labels	4	true
+ols	4	true
+pca	4	true
+rf	4	true
+scaler	4	true
+
+# metadata survives: kind, writer version, string labels
+query IIII
+SELECT ml_model_kind(model) = kind, ml_model_info(model).crate_version, ml_model_info(model).labels, ml_model_info(model).n_features
+FROM fm WHERE c = 'logistic_labels';
+----
+true	0.2.0	[hi, lo, mid]	2
+
+query I
+SELECT ml_predict_label(model, [5.9, 3.3]) IN ('hi', 'lo', 'mid') FROM fm WHERE c = 'logistic_labels';
+----
+true

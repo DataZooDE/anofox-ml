@@ -334,6 +334,7 @@ One-shot workflows over a table (name as a string) and its columns. They keep ev
 | `ml_fit_predict_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`: one model per group, fitted on the rows with a target, predicting every row (also those without one) |
 | `ml_fit_predict_proba_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`, `label`, `proba DOUBLE[]`, `classes` and `labels` |
 | `ml_cross_val_predict_by(source, group_col, id_col, y_col, x_cols, kind [, params := …, method := 'kfold', options := '{}'])` | `split` and the out-of-fold `prediction` of every labelled row (methods as in `ml_cv_splits_agg`) |
+| `ml_domain_classifier_drift_by(source, chunk_col, id_col, x_cols, reference [, kind := 'HistGradientBoostingClassifier', params := '{}', folds := 5, threshold := 0.55, seed := 0])` | Multivariate drift per chunk, as evidently's "model" method and NannyML's domain classifier. A classifier learns to tell the chunk's rows from the `reference` chunk's, and the stratified out-of-fold ROC AUC is about 0.5 without drift. Returns `chunk, n_reference, n_rows, auc, threshold, drifted` |
 | `ml_cluster_by(source, group_col, id_col, x_cols, kind [, params := …])` | `cluster` |
 | `ml_outlier_score_by(source, group_col, id_col, x_cols, kind [, params := …])` | `outlier_score` |
 | `ml_fit_transform_by(source, group_col, id_col, x_cols, kind [, params := …])` | `features DOUBLE[]` (embeddings, encodings, transforms) |
@@ -485,6 +486,15 @@ SELECT ml_rfe_agg('OlsRegressor', y, [x1, x2, x3, x4, x5], '{}', '{"n_features_t
 -- SelectFromModel(threshold="mean")
 SELECT list_filter(range(1, len(fi) + 1), lambda j: fi[j] >= list_avg(fi)) AS selected
 FROM (SELECT ml_feature_importances(ml_fit_agg('RandomForestRegressor', y, [x1, x2, x3, x4, x5])) AS fi FROM train);
+```
+
+**Multivariate drift.** `ml_domain_classifier_drift_by` flags chunks whose rows a classifier can tell apart from a reference chunk. To see which features drift, fit the same classifier on reference + chunk and read its importances:
+
+```sql
+FROM ml_domain_classifier_drift_by('events', week, id, [latency, size, retries], '2026-W40');
+
+SELECT ml_feature_importances(ml_fit_agg('HistGradientBoostingClassifier', (week = '2026-W45')::INT::DOUBLE, [latency, size, retries]))
+FROM events WHERE week IN ('2026-W40', '2026-W45');
 ```
 
 **Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:

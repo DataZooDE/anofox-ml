@@ -141,6 +141,7 @@ struct FitState {
     std::vector<std::string> *sx; // VARCHAR features of an encoder (string_x)
     bool string_x;
     std::string *options; // ml_tune_agg options
+    std::vector<uint8_t> *val; // per used row: 1 = validation row (ml_fit_with_validation_agg)
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -165,6 +166,7 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.string_x = false;
     s.options = new std::string();
     s.used = new std::vector<uint8_t>();
+    s.val = new std::vector<uint8_t>();
 }
 
 void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
@@ -181,6 +183,7 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.sx;
         delete s.options;
         delete s.used;
+        delete s.val;
     }
 }
 
@@ -239,21 +242,27 @@ void CheckFitSize(const AggregateInputData &aggr, idx_t n_values) {
 // Inputs: kind, [y,] x [, params [, weight]]; y is a string label when LABELS.
 // With UNLABELLED, a NULL y of a semi-supervised kind is kept as an
 // unlabelled row (y = -1, or a NULL label) instead of skipping the row.
-template <bool HAS_Y, bool HAS_W = false, bool LABELS = false, bool UNLABELLED = true>
+// With HAS_VAL, a BOOLEAN validation flag follows x (rows with a NULL flag
+// are skipped).
+template <bool HAS_Y, bool HAS_W = false, bool LABELS = false, bool UNLABELLED = true, bool HAS_VAL = false>
 void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
-    UnifiedVectorFormat kind_data, y_data, x_data, params_data, w_data, sdata;
+    constexpr idx_t P = X + 1 + (HAS_VAL ? 1 : 0); // params, then weight
+    UnifiedVectorFormat kind_data, y_data, x_data, val_data, params_data, w_data, sdata;
     inputs[0].ToUnifiedFormat(count, kind_data);
     if (HAS_Y) {
         inputs[1].ToUnifiedFormat(count, y_data);
     }
     inputs[X].ToUnifiedFormat(count, x_data);
-    const bool has_params = input_count > X + 1;
+    if (HAS_VAL) {
+        inputs[X + 1].ToUnifiedFormat(count, val_data);
+    }
+    const bool has_params = input_count > P;
     if (has_params) {
-        inputs[X + 1].ToUnifiedFormat(count, params_data);
+        inputs[P].ToUnifiedFormat(count, params_data);
     }
     if (HAS_W) {
-        inputs[X + 2].ToUnifiedFormat(count, w_data);
+        inputs[P + 1].ToUnifiedFormat(count, w_data);
     }
     state_vector.ToUnifiedFormat(count, sdata);
 
@@ -271,11 +280,12 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         auto yi = HAS_Y ? y_data.sel->get_index(i) : 0;
         auto xi = x_data.sel->get_index(i);
         auto wi = HAS_W ? w_data.sel->get_index(i) : 0;
+        auto vi = HAS_VAL ? val_data.sel->get_index(i) : 0;
         const bool no_y = HAS_Y && !y_data.validity.RowIsValid(yi);
         const bool unlabelled = UNLABELLED && no_y && kind_data.validity.RowIsValid(ki) &&
                                 anofox_ml_accepts_unlabelled(kinds[ki].GetString().c_str());
         if (!kind_data.validity.RowIsValid(ki) || (no_y && !unlabelled) || !x_data.validity.RowIsValid(xi) ||
-            (HAS_W && !w_data.validity.RowIsValid(wi))) {
+            (HAS_W && !w_data.validity.RowIsValid(wi)) || (HAS_VAL && !val_data.validity.RowIsValid(vi))) {
             s.used->push_back(0); // rows with a NULL kind, target, feature list or weight are skipped
             continue;
         }
@@ -314,6 +324,9 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         }
         if (HAS_W) {
             s.w->push_back(UnifiedVectorFormat::GetData<double>(w_data)[wi]);
+        }
+        if (HAS_VAL) {
+            s.val->push_back(UnifiedVectorFormat::GetData<bool>(val_data)[vi] ? 1 : 0);
         }
         s.n_rows++;
         s.used->push_back(1);
@@ -402,6 +415,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
         tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
         tgt.unlabelled->insert(tgt.unlabelled->end(), src.unlabelled->begin(), src.unlabelled->end());
+        tgt.val->insert(tgt.val->end(), src.val->begin(), src.val->end());
         tgt.sx->insert(tgt.sx->end(), src.sx->begin(), src.sx->end());
         tgt.n_rows += src.n_rows;
         CheckFitSize(aggr, tgt.x->size() + tgt.sx->size());
@@ -442,6 +456,37 @@ void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
                                 s.has_y ? s.y->data() : nullptr, w, FitThreads(aggr), &blob),
                   "ml_fit_agg");
         }
+        FlatVector::GetData<string_t>(result)[row] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
+        anofox_ml_free_bytes(blob);
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_fit_with_validation_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[], is_validation BOOLEAN
+//                            [, params VARCHAR [, weight DOUBLE]]) -> BLOB
+// Rows with is_validation = true are the validation set of early stopping.
+//===--------------------------------------------------------------------===//
+void FitValidationFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count,
+                           idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_fit_with_validation_agg");
+        AnofoxMlBytes blob {nullptr, 0};
+        std::vector<const char *> labels;
+        for (const auto &l : *s.labels) {
+            labels.push_back(l.c_str());
+        }
+        Check(anofox_ml_fit_validation(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                       s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
+                                       s.has_w ? s.w->data() : nullptr, s.val->data(), FitThreads(aggr), &blob),
+              "ml_fit_with_validation_agg");
         FlatVector::GetData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
@@ -1389,7 +1434,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
 {"ml_predict_log_proba", "predict_log_proba"}, {"ml_inverse_transform", "inverse_transform"},
-        {"ml_score_samples", "score_samples"},
+        {"ml_score_samples", "score_samples"}, {"ml_staged_predict", "staged_predict"},
     };
     for (const auto &f : list_functions) {
         loader.RegisterFunction(ScalarFunction(f.first, model_and_x, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
@@ -1448,6 +1493,23 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     fit_set.AddFunction(make_fit({V, string_features}, EncodeUpdate));
     fit_set.AddFunction(make_fit({V, string_features, V}, EncodeUpdate));
     loader.RegisterFunction(fit_set);
+
+    AggregateFunctionSet validation_set("ml_fit_with_validation_agg");
+    const auto B = LogicalType(LogicalTypeId::BOOLEAN), D = LogicalType(LogicalTypeId::DOUBLE);
+    auto make_validation = [](vector<LogicalType> args, aggregate_update_t update) {
+        AggregateFunction f("ml_fit_with_validation_agg", std::move(args), LogicalType(LogicalTypeId::BLOB),
+                            AggregateFunction::StateSize<FitState>, FitInitialize, update, FitCombine,
+                            FitValidationFinalize, nullptr, FitBind, FitDestroy);
+        f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+        return f;
+    };
+    validation_set.AddFunction(make_validation({V, D, features, B}, FitUpdate<true, false, false, false, true>));
+    validation_set.AddFunction(make_validation({V, D, features, B, V}, FitUpdate<true, false, false, false, true>));
+    validation_set.AddFunction(make_validation({V, D, features, B, V, D}, FitUpdate<true, true, false, false, true>));
+    validation_set.AddFunction(make_validation({V, V, features, B}, FitUpdate<true, false, true, false, true>));
+    validation_set.AddFunction(make_validation({V, V, features, B, V}, FitUpdate<true, false, true, false, true>));
+    validation_set.AddFunction(make_validation({V, V, features, B, V, D}, FitUpdate<true, true, true, false, true>));
+    loader.RegisterFunction(validation_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;
     auto make_rows = [&](const char *name, LogicalType result, aggregate_finalize_t finalize,

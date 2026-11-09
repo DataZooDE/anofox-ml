@@ -61,7 +61,7 @@ char *anofox_ml_predict(const uint8_t *model, size_t model_len, const double *x,
                         AnofoxMlDoubles *out);
 
 // Apply `method` (predict, predict_proba, decision_function, transform,
-// inverse_transform, score_samples) to n_rows rows of x; `out` receives
+// inverse_transform, score_samples, staged_predict) to n_rows rows of x; `out` receives
 // n_rows * out_cols doubles, row-major.
 char *anofox_ml_apply(const uint8_t *model, size_t model_len, const char *method, const double *x, size_t n_rows,
                       size_t n_cols, AnofoxMlDoubles *out, size_t *out_cols);
@@ -170,6 +170,13 @@ char *anofox_ml_spectral_embedding(const char *options, size_t n, const uint64_t
                                    const double *w, size_t m, AnofoxMlDoubles *out, size_t *out_cols);
 
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
+
+// Fit with an explicit validation set for early stopping: rows with
+// validation[i] != 0 validate, the others train. The target is y (doubles),
+// or the string labels y_labels when y is NULL; w may be NULL.
+char *anofox_ml_fit_validation(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
+                               const double *y, const char *const *y_labels, const double *w,
+                               const uint8_t *validation, size_t threads, AnofoxMlBytes *out);
 
 // Whether `kind` fits on unlabelled rows (semi-supervised kinds): ml_fit_agg
 // then passes rows with a NULL target as y = -1, or as a NULL label.

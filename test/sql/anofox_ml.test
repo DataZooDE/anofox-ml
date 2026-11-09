@@ -457,3 +457,59 @@ query I
 SELECT len(ml_cluster_centers(ml_fit_agg('NearestCentroid', lab, [a, b]))) FROM k04;
 ----
 2
+
+# Staged predictions of the boosting kinds: one value per stage, the last
+# equals ml_predict (anofox-ml 0.4).
+statement ok
+CREATE TABLE es AS SELECT i, (hash(i) % 1000) / 100.0 AS a, (hash(i, 'b') % 1000) / 100.0 AS b,
+    sin((hash(i) % 1000) / 100.0) * 3 + (hash(i, 'b') % 1000) / 100.0 + (hash(i, 'n') % 1000) / 250.0 AS y,
+    i % 5 = 0 AS val
+FROM range(2000) t(i);
+
+query III
+SELECT kind, len(sp), abs(sp[-1] - p) < 1e-12 FROM (
+    SELECT kind, ml_staged_predict(m, [1.0, 2.0]) AS sp, ml_predict(m, [1.0, 2.0]) AS p
+    FROM (SELECT kind, ml_fit_agg(kind, y, [a, b], '{"n_estimators": 30}') AS m
+          FROM es, (VALUES ('GradientBoostingRegressor'), ('HistGradientBoostingRegressor')) v(kind) GROUP BY kind))
+ORDER BY kind;
+----
+GradientBoostingRegressor	30	true
+HistGradientBoostingRegressor	30	true
+
+# classifiers: the predicted class (label index) per stage
+query I
+SELECT list_distinct(ml_staged_predict(ml_fit_agg('GradientBoostingClassifier', CASE WHEN y > 5 THEN 'hi' ELSE 'lo' END, [a, b], '{"n_estimators": 7}'), [9.0, 9.0])) FROM es;
+----
+[0.0]
+
+statement error
+SELECT ml_staged_predict(ml_fit_agg('RandomForestRegressor', y, [a, b], '{"n_estimators": 5}'), [1.0, 2.0]) FROM es;
+----
+staged_predict
+
+# Early stopping on an explicit validation set: stops before n_estimators,
+# depends on which rows validate, and is deterministic.
+query III
+SELECT n1 < 500, n1 = n2, n1 <> n3 FROM (
+    SELECT len(ml_staged_predict(m1, [1.0, 2.0])) AS n1, len(ml_staged_predict(m2, [1.0, 2.0])) AS n2, len(ml_staged_predict(m3, [1.0, 2.0])) AS n3
+    FROM (SELECT ml_fit_with_validation_agg('HistGradientBoostingRegressor', y, [a, b], val, p) AS m1,
+                 ml_fit_with_validation_agg('HistGradientBoostingRegressor', y, [a, b], val, p) AS m2,
+                 ml_fit_with_validation_agg('HistGradientBoostingRegressor', y, [a, b], i % 5 = 1, p) AS m3
+          FROM es, (SELECT '{"n_estimators": 500, "early_stopping": "Enabled", "learning_rate": 0.5, "n_iter_no_change": 5}' AS p)));
+----
+true	true	true
+
+query I
+SELECT ml_model_info(ml_fit_with_validation_agg('HistGradientBoostingClassifier', CASE WHEN y > 5 THEN 'hi' ELSE 'lo' END, [a, b], val, '{"n_estimators": 3}')).labels FROM es;
+----
+[hi, lo]
+
+statement error
+SELECT ml_fit_with_validation_agg('OlsRegressor', y, [a, b], val) FROM es;
+----
+does not support fit_with_validation
+
+statement error
+SELECT ml_fit_with_validation_agg('HistGradientBoostingRegressor', y, [a, b], false) FROM es;
+----
+needs both training and validation rows

@@ -277,14 +277,19 @@ FROM (SELECT store, ml_tune_agg('HistGradientBoostingRegressor', sales, [price, 
 
 ### Conformal Prediction
 
-Split conformal prediction: calibrate a fitted model on held-out rows, then ask for prediction intervals (regressors) or prediction sets (classifiers) at any miscoverage `alpha`. Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.
+Two ways to get prediction intervals (regressors) and prediction sets (classifiers). Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.
+
+- **Calibrate any fitted model** on held-out rows with `ml_conformalize_agg` (split conformal), then ask for intervals or sets at any `alpha`.
+- **Fit a conformal kind**, which holds out its own calibration rows or cross-fits when it is fitted: `SplitConformalRegressor`, `CrossConformalRegressor` (CV+ / jackknife+), `NormalizedConformalRegressor` (widths follow the local error scale), `ConformalizedQuantileRegressor` (CQR; `alpha` is fixed at fit time), `MondrianConformalRegressor` (coverage per group), `SplitConformalClassifier` (LAC / APS / RAPS sets) and `MondrianConformalClassifier`. They take the base model as `estimator` + `estimator_params`. The Mondrian kinds read the group id, a non-negative integer, from the feature at `group_column`.
 
 | Function | Description |
 |---|---|
 | `ml_conformalize_agg(model, y, [x1, x2, …])` | Aggregate over calibration rows: a copy of `model` with its conformity scores (absolute residuals for regressors, `1 − p(true class)` for classifiers). `y` may be `VARCHAR` for a model fitted on string labels |
-| `ml_predict_interval(model, [x1, x2, …], alpha)` | `STRUCT(lower, upper)` = prediction ± the conformal quantile of the residuals (infinite when there are too few calibration rows for `alpha`) |
-| `ml_predict_set(model, [x1, x2, …], alpha)` | `VARCHAR[]` of the classes whose score is within the conformal quantile |
+| `ml_predict_interval(model, [x1, x2, …], alpha)` | `STRUCT(lower, upper)`: for a calibrated model, prediction ± the conformal quantile of the residuals (infinite when there are too few calibration rows for `alpha`); for a conformal kind, its own interval |
+| `ml_predict_set(model, [x1, x2, …], alpha)` | `VARCHAR[]` of the classes whose score is within the conformal quantile (calibrated model) or in the conformal kind's set |
 | `ml_conformal_margin(y, y_pred, alpha)` | Aggregate: the conformal quantile of `abs(y − y_pred)`, model-free |
+| `ml_set_coverage(y, prediction_set)` / `ml_mean_set_size(prediction_set)` | Aggregates: the share of rows whose set contains `y`, and the mean set size |
+| `ml_mean_pinball_loss(y, q, alpha)` | Aggregate: pinball (quantile) loss of predictions `q` of the `alpha` quantile |
 
 ```sql
 CREATE TABLE model AS SELECT ml_fit_agg('HistGradientBoostingRegressor', y, [x1, x2]) AS m FROM train;
@@ -297,6 +302,12 @@ FROM test, calibrated;
 -- check it: coverage and interval score
 SELECT ml_coverage(y, pi90.lower, pi90.upper), ml_interval_score(y, pi90.lower, pi90.upper, 0.1)
 FROM (SELECT y, ml_predict_interval(m, [x1, x2], 0.1) AS pi90 FROM test, calibrated);
+
+-- or in one step: CV+ intervals around gradient boosting, one model per store
+CREATE TABLE models AS
+SELECT store, ml_fit_agg('CrossConformalRegressor', y, [x1, x2],
+       '{"estimator": "HistGradientBoostingRegressor", "estimator_params": {"max_iter": 200}, "cv": 5}') AS m
+FROM train GROUP BY store;
 ```
 
 ### Table Macros
@@ -396,7 +407,6 @@ SELECT avg(rmse), stddev(rmse) FROM (
 | Topic | Issue |
 |---|---|
 | TPE / Optuna-style tuning (rustuna) on top of `ml_tune_agg` | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
-| Intervals and sets from the conformal kinds (CV+, jackknife+, CQR, Mondrian) | [#6](https://github.com/DataZooDE/anofox-ml/issues/6) |
 | Semi-supervised fits with unlabelled (NULL-target) rows | [#44](https://github.com/DataZooDE/anofox-ml/issues/44) |
 | Everything else in anofox-ml 0.4 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
@@ -419,7 +429,7 @@ Pass the `kind` exactly as listed. `SELECT * FROM ml_estimators()` shows the def
 | **Decomposition & Manifold** | `Pca`, `IncrementalPca`, `KernelPca`, `TruncatedSvd`, `FastIca`, `Nmf`, `ClassicalMds`, `Isomap`, `LocallyLinearEmbedding`, `TSne`, `FactorAnalysis`, `FeatureAgglomeration`, `Nystroem`, `RbfSampler`, `GaussianRandomProjection`, `SparseRandomProjection` |
 | **Preprocessing** | `StandardScaler`, `MinMaxScaler`, `MaxAbsScaler`, `RobustScaler`, `Normalizer`, `Binarizer`, `PowerTransformer`, `QuantileTransformer`, `KBinsDiscretizer`, `PolynomialFeatures`, `SplineTransformer`, `RcsTransformer`, `TargetEncoder`, `SimpleImputer`, `KnnImputer`, `IterativeImputer`, `MissingIndicator`, `VarianceThreshold`, `SelectKBest`, `GenericUnivariateSelect`, `MutualInformationSelector`, `KernelCenterer`, `TfidfTransformer` |
 | **Meta-estimators** | `OneVsRestClassifier`, `OneVsOneClassifier`, `FixedThresholdClassifier`, `TunedThresholdClassifierCV`, `SelfTrainingClassifier`; they take a base `estimator` kind and `estimator_params` |
-| **Conformal** | `SplitConformalRegressor`, `CrossConformalRegressor`, `NormalizedConformalRegressor`, `ConformalizedQuantileRegressor`, `MondrianConformalRegressor`, `SplitConformalClassifier`, `MondrianConformalClassifier` (`ml_predict` / `ml_predict_proba` today; intervals and sets: [#6](https://github.com/DataZooDE/anofox-ml/issues/6)) |
+| **Conformal** | `SplitConformalRegressor`, `CrossConformalRegressor`, `NormalizedConformalRegressor`, `ConformalizedQuantileRegressor`, `MondrianConformalRegressor`, `SplitConformalClassifier`, `MondrianConformalClassifier`; intervals and sets through `ml_predict_interval` / `ml_predict_set`, see [Conformal Prediction](#conformal-prediction) |
 | **Baselines & Semi-supervised** | `DummyClassifier`, `DummyRegressor`, `LabelPropagation`, `LabelSpreading` (unlabelled rows: [#44](https://github.com/DataZooDE/anofox-ml/issues/44)) |
 
 Linear models and GLMs **with statistical inference** (standard errors, tests, diagnostics) live in [anofox-statistics](https://github.com/DataZooDE/anofox-statistics). The linear models here are for prediction.

@@ -8,6 +8,12 @@
 //! `q` is the finite-sample conformal quantile of the scores
 //! (`anofox_ml_conformal::conformal_quantile`); with too few calibration
 //! rows for `alpha` it is unbounded (infinite interval, every class).
+//!
+//! Models of the registry's conformal kinds (`SplitConformalRegressor`,
+//! `CrossConformalRegressor`, `ConformalizedQuantileRegressor`,
+//! `MondrianConformalClassifier`, …) calibrate themselves when fitted; when
+//! such a model has no calibration scores of its own here, its
+//! `predict_interval` / `predict_set` method answers.
 
 use std::ffi::c_char;
 
@@ -15,8 +21,8 @@ use ndarray::ArrayView1;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    apply_impl, decode, encode, err, into_doubles, into_strings, label_of, matrix, strings,
-    AnofoxMlBytes, AnofoxMlDoubles, AnofoxMlStrings,
+    apply_impl, decode, encode, err, flatten, into_doubles, into_strings, label_of, matrix,
+    strings, with_model, AnofoxMlBytes, AnofoxMlDoubles, AnofoxMlStrings, POOL,
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -80,11 +86,46 @@ fn conformalize(
     Ok(encode(&meta, bytes))
 }
 
+/// `method` (`predict_interval` / `predict_set`) of a conformal-kind model
+/// that has no calibration scores from `ml_conformalize_agg`: the
+/// row-major output and its column count, or `None` for other models.
+fn native(
+    blob: &[u8],
+    method: &str,
+    x: ndarray::ArrayView2<f64>,
+    alpha: f64,
+) -> Result<Option<(Vec<f64>, usize)>, String> {
+    if decode(blob)?.0.conformity.is_some() {
+        return Ok(None);
+    }
+    with_model(blob, |meta, model| {
+        if !model.capabilities().contains(&method) {
+            return Ok(None);
+        }
+        if x.ncols() != meta.n_features {
+            return Err(format!(
+                "{} was fitted on {} features, got {}",
+                meta.kind,
+                meta.n_features,
+                x.ncols()
+            ));
+        }
+        let out = POOL.with(|p| {
+            p.install(|| match method {
+                "predict_interval" => model.predict_interval(x, alpha),
+                _ => model.predict_set(x, alpha),
+            })
+        });
+        Ok(Some(flatten(out.map_err(|e| e.to_string())?)))
+    })
+}
+
 fn conformity_of(blob: &[u8], want: Score) -> Result<Conformity, String> {
     let (meta, _) = decode(blob)?;
-    let c = meta
-        .conformity
-        .ok_or("the model is not conformalized; calibrate it with ml_conformalize_agg")?;
+    let c = meta.conformity.ok_or(
+        "the model is not conformalized; calibrate it with ml_conformalize_agg, \
+         or fit a conformal kind such as SplitConformalRegressor",
+    )?;
     if c.score != want {
         return Err(match want {
             Score::AbsoluteResidual => "prediction intervals need a regressor; use ml_predict_set",
@@ -197,8 +238,12 @@ pub unsafe extern "C" fn anofox_ml_predict_interval(
             return Err("model is NULL".into());
         }
         let blob = std::slice::from_raw_parts(model, model_len);
+        let x = matrix(x, n_rows, n_cols)?;
+        if let Some((v, _)) = native(blob, "predict_interval", x, alpha)? {
+            return Ok(v);
+        }
         let q = quantile(&conformity_of(blob, Score::AbsoluteResidual)?, alpha)?;
-        let (p, _) = apply_impl(blob, "predict", matrix(x, n_rows, n_cols)?)?;
+        let (p, _) = apply_impl(blob, "predict", x)?;
         Ok(p.iter().flat_map(|&p| [p - q, p + q]).collect())
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
@@ -234,11 +279,33 @@ pub unsafe extern "C" fn anofox_ml_predict_set(
             return Err("model is NULL".into());
         }
         let blob = std::slice::from_raw_parts(model, model_len);
-        let q = quantile(&conformity_of(blob, Score::Lac)?, alpha)?;
+        let x = matrix(x, n_rows, n_cols)?;
         let (meta, _) = decode(blob)?;
-        let classes = meta.classes.clone().ok_or("the model has no classes")?;
-        let (p, k) = apply_impl(blob, "predict_proba", matrix(x, n_rows, n_cols)?)?;
         let (mut members, mut lens) = (Vec::new(), Vec::with_capacity(n_rows));
+        if let Some((sets, k)) = native(blob, "predict_set", x, alpha)? {
+            let classes = meta.classes.as_ref().ok_or("the model has no classes")?;
+            // n × classes membership (1 = in the set), columns in class order.
+            if k != classes.len() {
+                return Err(format!(
+                    "{} returned sets over {k} classes, the model has {}",
+                    meta.kind,
+                    classes.len()
+                ));
+            }
+            for row in sets.chunks(k) {
+                let before = members.len();
+                for (j, &m) in row.iter().enumerate() {
+                    if m > 0.5 {
+                        members.push(label_of(&meta, classes[j])?);
+                    }
+                }
+                lens.push((members.len() - before) as f64);
+            }
+            return Ok((members, lens));
+        }
+        let q = quantile(&conformity_of(blob, Score::Lac)?, alpha)?;
+        let classes = meta.classes.as_ref().ok_or("the model has no classes")?;
+        let (p, k) = apply_impl(blob, "predict_proba", x)?;
         for row in p.chunks(k) {
             let before = members.len();
             for (j, &pj) in row.iter().enumerate() {

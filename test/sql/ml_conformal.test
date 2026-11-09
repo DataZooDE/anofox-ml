@@ -107,3 +107,73 @@ statement error
 SELECT ml_conformalize_agg(model, 'zebra', [x]) FROM d, mc WHERE part = 1;
 ----
 not a label of the model
+
+# Conformal kinds of the registry calibrate themselves when fitted;
+# ml_predict_interval / ml_predict_set use their own predict_interval /
+# predict_set (anofox-ml 0.4).
+statement ok
+CREATE TABLE k AS SELECT
+    ml_fit_agg('SplitConformalRegressor', y, [x]) AS split,
+    ml_fit_agg('CrossConformalRegressor', y, [x], '{"cv": 5}') AS cv,
+    ml_fit_agg('ConformalizedQuantileRegressor', y, [x], '{"estimator": "GradientBoostingRegressor", "alpha": 0.1}') AS cqr,
+    ml_fit_agg('SplitConformalClassifier', lab, [x]) AS clf
+FROM d WHERE part < 2;
+
+query III
+SELECT abs(avg((y BETWEEN s.lower AND s.upper)::INT) - 0.9) < 0.05,
+       abs(avg((y BETWEEN c.lower AND c.upper)::INT) - 0.9) < 0.05,
+       abs(avg((y BETWEEN q.lower AND q.upper)::INT) - 0.9) < 0.05
+FROM (SELECT y, ml_predict_interval(split, [x], 0.1) AS s, ml_predict_interval(cv, [x], 0.1) AS c,
+             ml_predict_interval(cqr, [x], 0.1) AS q FROM d, k WHERE part = 2);
+----
+true	true	true
+
+# CQR fixes alpha at fit time
+statement error
+SELECT ml_predict_interval(cqr, [1.0], 0.2) FROM k;
+----
+alpha
+
+# split conformal sets over string labels; set metrics
+query III
+SELECT ml_set_coverage(lab, s) >= 0.85, ml_mean_set_size(s) BETWEEN 1 AND 5, bool_and(list_has_all(['a', 'b', 'c', 'hi', 'lo'], s))
+FROM (SELECT lab, ml_predict_set(clf, [x], 0.1) AS s FROM d, k WHERE part = 2);
+----
+true	true	true
+
+# ml_conformalize_agg on a conformal kind keeps the extension's calibration
+query I
+SELECT abs(avg((y BETWEEN pi.lower AND pi.upper)::INT) - 0.9) < 0.05
+FROM (SELECT y, ml_predict_interval(cm, [x], 0.1) AS pi FROM d,
+      (SELECT ml_conformalize_agg(split, y, [x]) AS cm FROM d, k WHERE part = 1 GROUP BY ALL) WHERE part = 2);
+----
+true
+
+# Mondrian: the group id is a feature column (group_column), coverage per group
+query II
+SELECT g, abs(avg((y BETWEEN pi.lower AND pi.upper)::INT) - 0.9) < 0.06
+FROM (SELECT g, y, ml_predict_interval(model, [x, g], 0.1) AS pi
+      FROM (SELECT *, (id % 2)::DOUBLE AS g FROM d) dd,
+           (SELECT ml_fit_agg('MondrianConformalRegressor', y, [x, (id % 2)::DOUBLE], '{"group_column": 1}') AS model FROM d WHERE part < 2)
+      WHERE part = 2)
+GROUP BY g ORDER BY g;
+----
+0.0	true
+1.0	true
+
+statement error
+SELECT ml_predict_interval(model, [1.0], 0.1) FROM m;
+----
+conformal kind
+
+# set metrics: numeric labels match their label text
+query II
+SELECT ml_set_coverage(y, s), ml_mean_set_size(s) FROM (VALUES (1.0, ['1', '2']), (2.0, ['1']), (3, ['3']), (NULL, ['1'])) v(y, s);
+----
+0.6666666666666666	1.25
+
+# pinball loss of a quantile forecast (sklearn mean_pinball_loss)
+query I
+SELECT round(ml_mean_pinball_loss(y, q, 0.9), 10) FROM (VALUES (1.0, 0.0), (0.0, 1.0)) v(y, q);
+----
+0.5

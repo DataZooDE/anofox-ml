@@ -306,7 +306,7 @@ FROM (SELECT y, ml_predict_interval(m, [x1, x2], 0.1) AS pi90 FROM test, calibra
 -- or in one step: CV+ intervals around gradient boosting, one model per store
 CREATE TABLE models AS
 SELECT store, ml_fit_agg('CrossConformalRegressor', y, [x1, x2],
-       '{"estimator": "HistGradientBoostingRegressor", "estimator_params": {"max_iter": 200}, "cv": 5}') AS m
+       '{"estimator": "HistGradientBoostingRegressor", "estimator_params": {"n_estimators": 200}, "cv": 5}') AS m
 FROM train GROUP BY store;
 ```
 

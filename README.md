@@ -402,6 +402,43 @@ SELECT avg(rmse), stddev(rmse) FROM (
     FROM f JOIN models USING (split) WHERE role = 'test' GROUP BY split);
 ```
 
+### Estimator Recipes
+
+**Wrapping another estimator.** Meta-estimators and conformal kinds take the base model as a kind name plus its parameters, nested in the JSON:
+
+```sql
+-- one-vs-rest SVMs over string labels
+SELECT ml_fit_agg('OneVsRestClassifier', churn, [a, b],
+       '{"estimator": "Svc", "estimator_params": {"c": 10.0}}') AS model FROM customers;
+
+-- a decision threshold tuned by cross-validation for F1 (binary targets), or a fixed one
+SELECT ml_fit_agg('TunedThresholdClassifierCV', churn, [a, b], '{"scoring": "F1"}') FROM customers;
+SELECT ml_fit_agg('FixedThresholdClassifier', churn, [a, b],
+       '{"estimator": "HistGradientBoostingClassifier", "threshold": 0.3}') FROM customers;
+```
+
+The defaults (`SELECT default_params FROM ml_estimators() WHERE kind = '…'`) show every option. `TunedThresholdClassifierCV` scores with `BalancedAccuracy` (default), `Accuracy`, `F1`, `Precision` or `Recall`.
+
+**Categorical features in CatBoost.** `CatBoostRegressor` / `CatBoostClassifier` build target statistics for the columns listed in `cat_features` (0-based indices into the feature list). Encode string categories as integer codes first (`dense_rank() OVER (ORDER BY store) - 1`, or `ml_fit_agg('OrdinalEncoder', …)`). They use CatBoost's own defaults: random permutations, MVS bootstrap and score noise. For a fit that depends only on the row order, pass `{"has_time": true, "random_strength": 0, "bootstrap_type": "No"}` and order the rows inside the aggregate:
+
+```sql
+SELECT ml_fit_agg('CatBoostRegressor', units, [price, store_code], '{"cat_features": [1]}' ORDER BY day) FROM sales;
+```
+
+**Densities and robust outliers.** `KernelDensity` and `FactorAnalysis` give per-row log-likelihoods through `ml_score_samples`. `EllipticEnvelope` (robust covariance) scores rows with `ml_outlier_score_agg` like the other detectors (lower = more anomalous):
+
+```sql
+SELECT ml_score_samples(ml_fit_agg('KernelDensity', [a, b], '{"bandwidth": {"Fixed": 1.0}}'), [5.0, 5.0]);
+```
+
+**Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:
+
+```sql
+WITH f AS (SELECT ml_fit_agg('Nystroem', [a, b], '{"n_components": 100}') AS fm FROM train),
+     m AS (SELECT fm, ml_fit_agg('LogisticRegressor', label, ml_transform(fm, [a, b])) AS model FROM train, f GROUP BY fm)
+SELECT ml_predict_proba(model, ml_transform(fm, [a, b])) FROM test, m;
+```
+
 ### Roadmap
 
 | Topic | Issue |

@@ -189,7 +189,8 @@ char *anofox_ml_warm_start(const uint8_t *model, size_t model_len, const char *p
 // then passes rows with a NULL target as y = -1, or as a NULL label.
 bool anofox_ml_accepts_unlabelled(const char *kind);
 
-char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'
+char *anofox_ml_kinds(char **out);
+char *anofox_ml_kind_capabilities(const char *kind, char **out);   // methods separated by '\n'                                   // kinds separated by '\n'
 char *anofox_ml_default_params(const char *kind, char **out);        // JSON
 char *anofox_ml_estimators_json(char **out);                         // [{kind, default_params}]
 char *anofox_ml_model_kind(const uint8_t *model, size_t model_len, char **out);

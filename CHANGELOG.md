@@ -10,6 +10,7 @@
 - `ml_warm_start_agg(model, y, x [, params])`: continue training a stored gradient-boosting / HGB / LGBM model (#17).
 - Covariance: `ml_covariance_agg` methods `shrunk` and `mcd` (robust) and a `location` field; `ml_covariance(model)` and `ml_mahalanobis(model, x)` for fitted covariance estimators (#45).
 - TF-IDF recipe: `TfidfTransformer` on hashed counts, tested against scikit-learn (#14).
+- `ml_estimators()` has a `capabilities` column; calling a method a model lacks names what it supports and which kinds have the method (#9).
 - Semi-supervised fits: for `LabelPropagation`, `LabelSpreading` and `SelfTrainingClassifier`, rows with a NULL target are unlabelled rows of the fit instead of being skipped (#44).
 
 ## [0.1.0] - 2026-11-08

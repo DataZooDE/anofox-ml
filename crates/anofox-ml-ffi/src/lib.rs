@@ -954,11 +954,53 @@ pub unsafe extern "C" fn anofox_ml_free_strings(s: AnofoxMlStrings) {
 }
 
 /// Apply `method` to `x`; returns the row-major output and its column count.
+/// Methods of every registered kind (static per kind), in registry order.
+fn kind_capabilities() -> &'static [(&'static str, Vec<&'static str>)] {
+    static CAPS: std::sync::OnceLock<Vec<(&'static str, Vec<&'static str>)>> =
+        std::sync::OnceLock::new();
+    CAPS.get_or_init(|| {
+        anofox_ml_registry::kinds()
+            .into_iter()
+            .filter_map(|k| {
+                let m = anofox_ml_registry::make(k, &serde_json::json!({})).ok()?;
+                Some((k, m.capabilities()))
+            })
+            .collect()
+    })
+}
+
+/// `Ok` when `model` has `method` (`predict_log_proba` needs
+/// `predict_proba`); otherwise an error naming what it supports and the
+/// kinds that have the method.
+fn require_method(kind: &str, model: &dyn DynModel, method: &str) -> Result<(), String> {
+    let cap = match method {
+        "predict_log_proba" => "predict_proba",
+        m => m,
+    };
+    let caps = model.capabilities();
+    if caps.contains(&cap) {
+        return Ok(());
+    }
+    let with: Vec<&str> = kind_capabilities()
+        .iter()
+        .filter(|(_, c)| c.contains(&cap))
+        .map(|(k, _)| *k)
+        .collect();
+    let examples = with.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+    Err(format!(
+        "{kind} does not support {cap} (it supports: {}). {} kinds do, e.g. {examples}; list them with \
+         SELECT kind FROM ml_estimators() WHERE list_contains(capabilities, '{cap}')",
+        caps.join(", "),
+        with.len()
+    ))
+}
+
 fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>, usize), String> {
     if !METHODS.contains(&method) {
         return Err(format!("unknown method '{method}' (known: {METHODS:?})"));
     }
     with_model(blob, |meta, model| {
+        require_method(&meta.kind, model, method)?;
         if x.ncols() != meta.n_features {
             return Err(format!(
                 "{} was fitted on {} features, got {}",
@@ -1059,6 +1101,31 @@ pub unsafe extern "C" fn anofox_ml_estimators_json(out: *mut *mut c_char) -> *mu
         .collect();
     *out = err(serde_json::Value::Array(list));
     std::ptr::null_mut()
+}
+
+/// Methods of `kind` (as `ml_model_info(model).capabilities` of a fitted
+/// model), separated by `\n`.
+///
+/// # Safety
+/// `kind` is a NUL-terminated string; `out` is writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_kind_capabilities(
+    kind: *const c_char,
+    out: *mut *mut c_char,
+) -> *mut c_char {
+    match str_arg(kind, "kind").and_then(|k| {
+        kind_capabilities()
+            .iter()
+            .find(|(n, _)| *n == k)
+            .map(|(_, c)| c.join("\n"))
+            .ok_or_else(|| format!("unknown kind '{k}'"))
+    }) {
+        Ok(c) => {
+            *out = err(c);
+            std::ptr::null_mut()
+        }
+        Err(e) => err(e),
+    }
 }
 
 /// Registered estimator kinds, separated by `\n`.
@@ -1221,6 +1288,7 @@ pub unsafe extern "C" fn anofox_ml_model_array(
         let blob = std::slice::from_raw_parts(model, model_len);
         with_model(blob, |meta, model| {
             if keys == ["feature_importances"] {
+                require_method(&meta.kind, model, "feature_importances")?;
                 let (v, cols) = flatten(model.feature_importances().map_err(|e| e.to_string())?);
                 return Ok((v.len() / cols.max(1), cols, v));
             }

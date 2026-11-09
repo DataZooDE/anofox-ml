@@ -116,7 +116,12 @@ fn native(
                 _ => model.predict_set(x, alpha),
             })
         });
-        Ok(Some(flatten(out.map_err(|e| e.to_string())?)))
+        let out = out.map_err(|e| {
+            format!(
+                "{e} (or calibrate the model with ml_conformalize_agg, or fit a conformal kind)"
+            )
+        })?;
+        Ok(Some(flatten(out)))
     })
 }
 

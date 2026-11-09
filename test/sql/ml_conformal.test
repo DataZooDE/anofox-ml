@@ -91,7 +91,7 @@ SELECT count(*) FROM (
 statement error
 SELECT ml_predict_interval(model, [1.0], 0.1) FROM m;
 ----
-not conformalized
+calibrate the model with ml_conformalize_agg
 
 statement error
 SELECT ml_predict_set(model, [1.0], 0.1) FROM c;

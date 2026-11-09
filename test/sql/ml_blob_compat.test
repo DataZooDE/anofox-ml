@@ -53,3 +53,36 @@ query I
 SELECT ml_predict_label(model, [5.9, 3.3]) IN ('hi', 'lo', 'mid') FROM fm WHERE c = 'logistic_labels';
 ----
 true
+
+# anofox-ml 0.4 (extension at fb869aa), including kinds added in 0.3 / 0.4
+statement ok
+CREATE TABLE fm4 AS SELECT "case" AS c, kind, method, unhex(blob_hex) AS model
+FROM read_csv('test/data/blobs/models_v0.4.csv', all_varchar = true);
+
+statement ok
+CREATE TABLE fe4 AS SELECT "case" AS c, "row"::INT AS r, x::DOUBLE[] AS x, expected::DOUBLE[] AS e
+FROM read_csv('test/data/blobs/expected_v0.4.csv', all_varchar = true);
+
+query III
+SELECT c, count(*), max(list_max(list_transform(list_zip(got, e), lambda p: abs(p[1] - p[2])))) < 1e-12 FROM (
+    SELECT c, e, CASE method
+        WHEN 'predict' THEN [ml_predict(model, x)]
+        WHEN 'predict_proba' THEN ml_predict_proba(model, x)
+        WHEN 'transform' THEN ml_transform(model, x)
+        WHEN 'score_samples' THEN ml_score_samples(model, x) END AS got
+    FROM fm4 JOIN fe4 USING (c))
+GROUP BY c ORDER BY c;
+----
+catboost	4	true
+gnb	4	true
+hgb	4	true
+iforest	4	true
+kmeans	4	true
+ledoit_wolf	4	true
+logistic_labels	4	true
+ols	4	true
+pca	4	true
+perpetual	4	true
+rf	4	true
+scaler	4	true
+split_conformal	4	true

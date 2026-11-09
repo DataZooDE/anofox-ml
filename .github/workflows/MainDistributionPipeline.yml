@@ -22,7 +22,7 @@ jobs:
       enable_rust: true
       reduced_ci_mode: disabled
       # The wasm job of extension-ci-tools v1.5.6 pins rustc 1.86, but
-      # anofox-ml 0.2 needs 1.87: the wasm builds run in the job below.
+      # anofox_ml needs 1.88 (perpetual): the wasm builds run in the job below.
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
 
   # DuckDB-Wasm builds: extension-ci-tools' wasm job with a current Rust

@@ -2,6 +2,7 @@
 name = "anofox_ml_ffi"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "C ABI over anofox-ml-registry for the anofox_ml DuckDB extension"
@@ -11,7 +12,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 anofox-ml-core = "0.4"
-anofox-ml-registry = "0.4"
+anofox-ml-registry = { version = "0.4", features = ["perpetual"] }
 anofox-ml-metrics = "0.4"
 anofox-ml-conformal = "0.4"
 anofox-ml-text = "0.4"

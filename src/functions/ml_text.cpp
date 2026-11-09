@@ -10,6 +10,7 @@
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
+#include "../include/duckdb_compat.hpp"
 
 namespace duckdb {
 
@@ -34,9 +35,8 @@ void HashingFunction(DataChunk &args, ExpressionState &, Vector &result) {
     // list fields of the struct.
     Vector *lists[2] = {&result, nullptr};
     if (!DENSE) {
-        auto &fields = StructVector::GetEntries(result);
-        lists[0] = fields[0].get();
-        lists[1] = fields[1].get();
+        lists[0] = &compat::StructField(result, 0);
+        lists[1] = &compat::StructField(result, 1);
     }
     for (idx_t i = 0; i < count; i++) {
         auto ti = text_data.sel->get_index(i);
@@ -66,26 +66,25 @@ void HashingFunction(DataChunk &args, ExpressionState &, Vector &result) {
         if (DENSE) {
             idx_t offset = ListVector::GetListSize(result);
             ListVector::Reserve(result, offset + out.len);
-            memcpy(FlatVector::GetData<double>(ListVector::GetEntry(result)) + offset, out.data,
-                   out.len * sizeof(double));
+            memcpy(compat::FlatData<double>(compat::ListChild(result)) + offset, out.data, out.len * sizeof(double));
             ListVector::SetListSize(result, offset + out.len);
-            FlatVector::GetData<list_entry_t>(result)[i] = list_entry_t(offset, out.len);
+            compat::FlatData<list_entry_t>(result)[i] = list_entry_t(offset, out.len);
         } else {
             idx_t nnz = out.len / 2;
             for (idx_t f = 0; f < 2; f++) {
                 auto &list = *lists[f];
                 idx_t offset = ListVector::GetListSize(list);
                 ListVector::Reserve(list, offset + nnz);
-                auto &child = ListVector::GetEntry(list);
+                auto &child = compat::ListChild(list);
                 for (idx_t j = 0; j < nnz; j++) {
                     if (f == 0) {
-                        FlatVector::GetData<int32_t>(child)[offset + j] = static_cast<int32_t>(out.data[j]);
+                        compat::FlatData<int32_t>(child)[offset + j] = static_cast<int32_t>(out.data[j]);
                     } else {
-                        FlatVector::GetData<double>(child)[offset + j] = out.data[nnz + j];
+                        compat::FlatData<double>(child)[offset + j] = out.data[nnz + j];
                     }
                 }
                 ListVector::SetListSize(list, offset + nnz);
-                FlatVector::GetData<list_entry_t>(list)[i] = list_entry_t(offset, nnz);
+                compat::FlatData<list_entry_t>(list)[i] = list_entry_t(offset, nnz);
             }
         }
         anofox_ml_free_doubles(out);
@@ -106,9 +105,9 @@ void RegisterMlText(ExtensionLoader &loader) {
     const auto sparse = LogicalType::STRUCT(std::move(fields));
     ScalarFunctionSet dense_set("ml_hashing_vectorize"), sparse_set("ml_hashing_vectorize_sparse");
     for (auto args : {vector<LogicalType> {V, B}, vector<LogicalType> {V, B, V}}) {
-        dense_set.AddFunction(
-            ScalarFunction(args, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)), HashingFunction<true>));
-        sparse_set.AddFunction(ScalarFunction(args, sparse, HashingFunction<false>));
+        dense_set.AddFunction(Fallible(
+            ScalarFunction(args, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)), HashingFunction<true>)));
+        sparse_set.AddFunction(Fallible(ScalarFunction(args, sparse, HashingFunction<false>)));
     }
     loader.RegisterFunction(dense_set);
     loader.RegisterFunction(sparse_set);

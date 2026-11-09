@@ -15,6 +15,7 @@
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
+#include "../include/duckdb_compat.hpp"
 
 namespace duckdb {
 
@@ -29,8 +30,7 @@ struct StatState {
     idx_t n_cols;
 };
 
-void StatInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<StatState *>(state_p);
+void StatInitialize(StatState &s) {
     s.x = new std::vector<double>();
     s.y = new std::vector<double>();
     s.labels = new std::vector<std::string>();
@@ -64,11 +64,11 @@ void StatUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector
     }
     state_vector.ToUnifiedFormat(count, sdata);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(inputs[X]);
+    auto &child = compat::ListChild(inputs[X]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(inputs[X]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
-    auto states = reinterpret_cast<StatState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<StatState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto xi = x_data.sel->get_index(i);
@@ -148,7 +148,7 @@ bool RunStat(const char *function, const char *name, StatState &s, AnofoxMlDoubl
     return true;
 }
 
-void MutualInfoFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void MutualInfoFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<StatState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         idx_t row = i + offset;
@@ -159,18 +159,16 @@ void MutualInfoFinalize(Vector &state_vector, AggregateInputData &, Vector &resu
         }
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + out.len);
-        memcpy(FlatVector::GetData<double>(ListVector::GetEntry(result)) + list_offset, out.data,
-               out.len * sizeof(double));
+        memcpy(compat::FlatData<double>(compat::ListChild(result)) + list_offset, out.data, out.len * sizeof(double));
         ListVector::SetListSize(result, list_offset + out.len);
-        FlatVector::GetData<list_entry_t>(result)[row] = list_entry_t(list_offset, out.len);
+        compat::FlatData<list_entry_t>(result)[row] = list_entry_t(list_offset, out.len);
         anofox_ml_free_doubles(out);
     }
 }
 
-void CovarianceFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void CovarianceFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<StatState *>(state_vector);
-    auto &fields = StructVector::GetEntries(result);
-    auto &cov = *fields[0];
+    auto &cov = compat::StructField(result, 0);
     for (idx_t i = 0; i < count; i++) {
         idx_t row = i + offset;
         AnofoxMlDoubles out {nullptr, 0};
@@ -181,34 +179,33 @@ void CovarianceFinalize(Vector &state_vector, AggregateInputData &, Vector &resu
         idx_t d = states[i]->n_cols;
         idx_t outer = ListVector::GetListSize(cov);
         ListVector::Reserve(cov, outer + d);
-        auto &rows = ListVector::GetEntry(cov);
+        auto &rows = compat::ListChild(cov);
         idx_t inner = ListVector::GetListSize(rows);
         ListVector::Reserve(rows, inner + d * d);
-        memcpy(FlatVector::GetData<double>(ListVector::GetEntry(rows)) + inner, out.data, d * d * sizeof(double));
+        memcpy(compat::FlatData<double>(compat::ListChild(rows)) + inner, out.data, d * d * sizeof(double));
         for (idx_t r = 0; r < d; r++) {
-            FlatVector::GetData<list_entry_t>(rows)[outer + r] = list_entry_t(inner + r * d, d);
+            compat::FlatData<list_entry_t>(rows)[outer + r] = list_entry_t(inner + r * d, d);
         }
         ListVector::SetListSize(rows, inner + d * d);
         ListVector::SetListSize(cov, outer + d);
-        FlatVector::GetData<list_entry_t>(cov)[row] = list_entry_t(outer, d);
+        compat::FlatData<list_entry_t>(cov)[row] = list_entry_t(outer, d);
         const double shrinkage = out.data[d * d];
         if (std::isnan(shrinkage)) {
-            FlatVector::SetNull(*fields[1], row, true);
+            FlatVector::SetNull(compat::StructField(result, 1), row, true);
         } else {
-            FlatVector::GetData<double>(*fields[1])[row] = shrinkage;
+            compat::FlatData<double>(compat::StructField(result, 1))[row] = shrinkage;
         }
-        auto &loc = *fields[2];
+        auto &loc = compat::StructField(result, 2);
         idx_t loc_size = ListVector::GetListSize(loc);
         ListVector::Reserve(loc, loc_size + d);
-        memcpy(FlatVector::GetData<double>(ListVector::GetEntry(loc)) + loc_size, out.data + d * d + 1,
-               d * sizeof(double));
+        memcpy(compat::FlatData<double>(compat::ListChild(loc)) + loc_size, out.data + d * d + 1, d * sizeof(double));
         ListVector::SetListSize(loc, loc_size + d);
-        FlatVector::GetData<list_entry_t>(loc)[row] = list_entry_t(loc_size, d);
+        compat::FlatData<list_entry_t>(loc)[row] = list_entry_t(loc_size, d);
         anofox_ml_free_doubles(out);
     }
 }
 
-void BandwidthFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void BandwidthFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<StatState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         idx_t row = i + offset;
@@ -217,7 +214,7 @@ void BandwidthFinalize(Vector &state_vector, AggregateInputData &, Vector &resul
             FlatVector::SetNull(result, row, true);
             continue;
         }
-        FlatVector::GetData<double>(result)[row] = out.data[0];
+        compat::FlatData<double>(result)[row] = out.data[0];
         anofox_ml_free_doubles(out);
     }
 }
@@ -234,8 +231,7 @@ struct EdgeState {
     std::string *options;
 };
 
-void EdgeInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<EdgeState *>(state_p);
+void EdgeInitialize(EdgeState &s) {
     s.src = new std::vector<int64_t>();
     s.dst = new std::vector<int64_t>();
     s.w = new std::vector<double>();
@@ -263,7 +259,7 @@ void EdgeUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector
         inputs[3].ToUnifiedFormat(count, o);
     }
     state_vector.ToUnifiedFormat(count, sdata);
-    auto states = reinterpret_cast<EdgeState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<EdgeState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto ai = a.sel->get_index(i), bi = b.sel->get_index(i);
@@ -299,9 +295,9 @@ void EdgeCombine(Vector &source_vector, Vector &target_vector, AggregateInputDat
     }
 }
 
-void EdgeFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void EdgeFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<EdgeState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -339,15 +335,15 @@ void EdgeFinalize(Vector &state_vector, AggregateInputData &, Vector &result, id
         idx_t n = nodes.size();
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + n);
-        auto &fields = StructVector::GetEntries(ListVector::GetEntry(result));
-        auto node_out = FlatVector::GetData<int64_t>(*fields[0]);
-        auto &emb = *fields[1];
+        auto &structs = compat::ListChild(result);
+        auto node_out = compat::FlatData<int64_t>(compat::StructField(structs, 0));
+        auto &emb = compat::StructField(structs, 1);
         idx_t e_offset = ListVector::GetListSize(emb);
         ListVector::Reserve(emb, e_offset + n * cols);
-        memcpy(FlatVector::GetData<double>(ListVector::GetEntry(emb)) + e_offset, out.data, n * cols * sizeof(double));
+        memcpy(compat::FlatData<double>(compat::ListChild(emb)) + e_offset, out.data, n * cols * sizeof(double));
         for (idx_t r = 0; r < n; r++) {
             node_out[list_offset + r] = nodes[r];
-            FlatVector::GetData<list_entry_t>(emb)[list_offset + r] = list_entry_t(e_offset + r * cols, cols);
+            compat::FlatData<list_entry_t>(emb)[list_offset + r] = list_entry_t(e_offset + r * cols, cols);
         }
         ListVector::SetListSize(emb, e_offset + n * cols);
         anofox_ml_free_doubles(out);
@@ -364,8 +360,8 @@ void RegisterMlStats(ExtensionLoader &loader) {
     auto make = [](const char *name, vector<LogicalType> args, LogicalType result, aggregate_update_t update,
                    aggregate_finalize_t finalize) {
         AggregateFunction f(name, std::move(args), std::move(result), AggregateFunction::StateSize<StatState>,
-                            StatInitialize, update, StatCombine, finalize, FunctionNullHandling::SPECIAL_HANDLING,
-                            nullptr, nullptr, StatDestroy);
+                            compat::StateInit<StatInitialize>, update, StatCombine, finalize,
+                            FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr, StatDestroy);
         return f;
     };
     AggregateFunctionSet mi("ml_mutual_info_agg");
@@ -400,7 +396,7 @@ void RegisterMlStats(ExtensionLoader &loader) {
     AggregateFunctionSet emb("ml_spectral_embedding_agg");
     for (auto args : {vector<LogicalType> {B, B}, vector<LogicalType> {B, B, D}, vector<LogicalType> {B, B, D, V}}) {
         AggregateFunction f("ml_spectral_embedding_agg", args, emb_type, AggregateFunction::StateSize<EdgeState>,
-                            EdgeInitialize, EdgeUpdate, EdgeCombine, EdgeFinalize,
+                            compat::StateInit<EdgeInitialize>, EdgeUpdate, EdgeCombine, EdgeFinalize,
                             FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr, EdgeDestroy);
         emb.AddFunction(f);
     }

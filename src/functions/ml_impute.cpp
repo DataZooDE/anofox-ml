@@ -14,6 +14,7 @@
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
+#include "../include/duckdb_compat.hpp"
 
 namespace duckdb {
 
@@ -28,8 +29,7 @@ struct ImputeState {
     idx_t n_cols;
 };
 
-void ImputeInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<ImputeState *>(state_p);
+void ImputeInitialize(ImputeState &s) {
     s.ids = new std::vector<int64_t>();
     s.x = new std::vector<double>();
     s.options = new std::string();
@@ -54,11 +54,11 @@ void ImputeUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vect
     }
     state_vector.ToUnifiedFormat(count, sdata);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(inputs[1]);
+    auto &child = compat::ListChild(inputs[1]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
-    auto states = reinterpret_cast<ImputeState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<ImputeState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto ii = id_data.sel->get_index(i);
@@ -107,9 +107,9 @@ void ImputeCombine(Vector &source_vector, Vector &target_vector, AggregateInputD
     }
 }
 
-void ImputeFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void ImputeFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<ImputeState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -128,17 +128,17 @@ void ImputeFinalize(Vector &state_vector, AggregateInputData &, Vector &result, 
         idx_t n = s.ids->size(), d = s.n_cols, total = m * n;
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + total);
-        auto &fields = StructVector::GetEntries(ListVector::GetEntry(result));
-        auto imp = FlatVector::GetData<int32_t>(*fields[0]);
-        auto ids = FlatVector::GetData<int64_t>(*fields[1]);
-        auto &xs = *fields[2];
+        auto &structs = compat::ListChild(result);
+        auto imp = compat::FlatData<int32_t>(compat::StructField(structs, 0));
+        auto ids = compat::FlatData<int64_t>(compat::StructField(structs, 1));
+        auto &xs = compat::StructField(structs, 2);
         idx_t x_offset = ListVector::GetListSize(xs);
         ListVector::Reserve(xs, x_offset + total * d);
-        memcpy(FlatVector::GetData<double>(ListVector::GetEntry(xs)) + x_offset, out.data, total * d * sizeof(double));
+        memcpy(compat::FlatData<double>(compat::ListChild(xs)) + x_offset, out.data, total * d * sizeof(double));
         for (idx_t e = 0; e < total; e++) {
             imp[list_offset + e] = static_cast<int32_t>(e / n + 1);
             ids[list_offset + e] = (*s.ids)[e % n];
-            FlatVector::GetData<list_entry_t>(xs)[list_offset + e] = list_entry_t(x_offset + e * d, d);
+            compat::FlatData<list_entry_t>(xs)[list_offset + e] = list_entry_t(x_offset + e * d, d);
         }
         ListVector::SetListSize(xs, x_offset + total * d);
         anofox_ml_free_doubles(out);
@@ -160,8 +160,9 @@ void RegisterMlImpute(ExtensionLoader &loader) {
     AggregateFunctionSet set(kImpute);
     for (auto args : {vector<LogicalType> {B, L}, vector<LogicalType> {B, L, V}}) {
         set.AddFunction(AggregateFunction(kImpute, args, result, AggregateFunction::StateSize<ImputeState>,
-                                          ImputeInitialize, ImputeUpdate, ImputeCombine, ImputeFinalize,
-                                          FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr, ImputeDestroy));
+                                          compat::StateInit<ImputeInitialize>, ImputeUpdate, ImputeCombine,
+                                          ImputeFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
+                                          ImputeDestroy));
     }
     loader.RegisterFunction(set);
 }

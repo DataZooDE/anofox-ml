@@ -17,7 +17,7 @@ statement ok
 CREATE TABLE m AS SELECT ml_fit_agg('OlsRegressor', y, [a, noise, b]) AS model FROM d;
 
 query IIII
-SELECT list_transform(imp, s -> s.feature),
+SELECT list_transform(imp, lambda s: s.feature),
        imp[1].importance_mean > imp[3].importance_mean,
        imp[3].importance_mean > 0,
        abs(imp[2].importance_mean) < 1e-6

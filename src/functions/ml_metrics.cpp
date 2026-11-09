@@ -11,6 +11,7 @@
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
+#include "../include/duckdb_compat.hpp"
 
 namespace duckdb {
 
@@ -27,8 +28,7 @@ struct MetricState {
     bool has_w;
 };
 
-void MetricInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<MetricState *>(state_p);
+void MetricInitialize(MetricState &s) {
     s.y = new std::vector<double>();
     s.p = new std::vector<double>();
     s.w = new std::vector<double>();
@@ -76,7 +76,7 @@ void MetricUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vect
         inputs[3].ToUnifiedFormat(count, d);
     }
     state_vector.ToUnifiedFormat(count, sdata);
-    auto states = reinterpret_cast<MetricState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<MetricState *>(sdata);
 
     // The list argument: pred for PAIR with LIST_PRED, x for SILHOUETTE.
     constexpr bool HAS_LIST = SHAPE == Shape::SILHOUETTE || LIST_PRED;
@@ -85,7 +85,7 @@ void MetricUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vect
     UnifiedVectorFormat child_data;
     const double *child_values = nullptr;
     if (HAS_LIST) {
-        auto &child = ListVector::GetEntry(inputs[LIST_ARG]);
+        auto &child = compat::ListChild(inputs[LIST_ARG]);
         child.ToUnifiedFormat(ListVector::GetListSize(inputs[LIST_ARG]), child_data);
         child_values = UnifiedVectorFormat::GetData<double>(child_data);
     }
@@ -183,7 +183,7 @@ void LabelMetricUpdate(Vector inputs[], AggregateInputData &, idx_t input_count,
         inputs[3].ToUnifiedFormat(count, d);
     }
     state_vector.ToUnifiedFormat(count, sdata);
-    auto states = reinterpret_cast<MetricState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<MetricState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto ai = a.sel->get_index(i);
@@ -246,8 +246,8 @@ void MetricCombine(Vector &source_vector, Vector &target_vector, AggregateInputD
 
 // The metric of an aggregate: attached as function_info at registration and
 // handed to finalize as bind data.
-struct MetricInfo : public AggregateFunctionInfo {
-    explicit MetricInfo(Metric metric_p) : metric(metric_p) {
+struct MetricFunctionInfo : public AggregateFunctionInfo {
+    explicit MetricFunctionInfo(Metric metric_p) : metric(metric_p) {
     }
     Metric metric;
 };
@@ -264,14 +264,14 @@ struct MetricBindData : public FunctionData {
     }
 };
 
-unique_ptr<FunctionData> MetricBind(ClientContext &, AggregateFunction &function, vector<unique_ptr<Expression>> &) {
-    return make_uniq<MetricBindData>(function.function_info->Cast<MetricInfo>().metric);
+unique_ptr<FunctionData> MetricBind(ClientContext &, optional_ptr<AggregateFunctionInfo> info) {
+    return make_uniq<MetricBindData>(info->Cast<MetricFunctionInfo>().metric);
 }
 
-void MetricFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void MetricFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto &metric = aggr.bind_data->Cast<MetricBindData>().metric;
     auto states = FlatVector::GetData<MetricState *>(state_vector);
-    auto out = FlatVector::GetData<double>(result);
+    auto out = compat::FlatData<double>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -360,10 +360,10 @@ void RegisterMlMetrics(ExtensionLoader &loader) {
         AggregateFunctionSet set(spec.metric.function);
         auto add = [&](vector<LogicalType> args, aggregate_update_t update) {
             AggregateFunction f(spec.metric.function, std::move(args), LogicalType(LogicalTypeId::DOUBLE),
-                                AggregateFunction::StateSize<MetricState>, MetricInitialize, update, MetricCombine,
-                                MetricFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, MetricBind,
-                                MetricDestroy);
-            f.function_info = make_shared_ptr<MetricInfo>(spec.metric);
+                                AggregateFunction::StateSize<MetricState>, compat::StateInit<MetricInitialize>, update,
+                                MetricCombine, MetricFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr,
+                                compat::AggregateBind<MetricBind>, MetricDestroy);
+            compat::SetFunctionInfo(f, make_shared_ptr<MetricFunctionInfo>(spec.metric));
             f.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
             set.AddFunction(f);
         };

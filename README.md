@@ -335,6 +335,7 @@ One-shot workflows over a table (name as a string) and its columns. They keep ev
 | `ml_fit_predict_proba_by(source, group_col, y_col, x_cols, kind [, params := …])` | `prediction`, `label`, `proba DOUBLE[]`, `classes` and `labels` |
 | `ml_cross_val_predict_by(source, group_col, id_col, y_col, x_cols, kind [, params := …, method := 'kfold', options := '{}'])` | `split` and the out-of-fold `prediction` of every labelled row (methods as in `ml_cv_splits_agg`) |
 | `ml_domain_classifier_drift_by(source, chunk_col, id_col, x_cols, reference [, kind := 'HistGradientBoostingClassifier', params := '{}', folds := 5, threshold := 0.55, seed := 0])` | Multivariate drift per chunk, as evidently's "model" method and NannyML's domain classifier. A classifier learns to tell the chunk's rows from the `reference` chunk's, and the stratified out-of-fold ROC AUC is about 0.5 without drift. Returns `chunk, n_reference, n_rows, auc, threshold, drifted` |
+| `ml_dle_estimate_by(reference, analysis, chunk_col, y_col, pred_col, x_cols [, kind := 'LgbmRegressor', params := '{}'])` | Direct loss estimation, as NannyML's DLE. It estimates a regression model's MAE and RMSE per chunk of `analysis` without labels: two models learn the absolute and the squared error on the labelled `reference` rows, from `x_cols` plus the prediction. Returns `chunk, n_rows, estimated_mae, mae_sampling_error, estimated_rmse, rmse_sampling_error` |
 | `ml_cluster_by(source, group_col, id_col, x_cols, kind [, params := …])` | `cluster` |
 | `ml_outlier_score_by(source, group_col, id_col, x_cols, kind [, params := …])` | `outlier_score` |
 | `ml_fit_transform_by(source, group_col, id_col, x_cols, kind [, params := …])` | `features DOUBLE[]` (embeddings, encodings, transforms) |
@@ -495,6 +496,16 @@ FROM ml_domain_classifier_drift_by('events', week, id, [latency, size, retries],
 
 SELECT ml_feature_importances(ml_fit_agg('HistGradientBoostingClassifier', (week = '2026-W45')::INT::DOUBLE, [latency, size, retries]))
 FROM events WHERE week IN ('2026-W40', '2026-W45');
+```
+
+**Performance without labels.** `ml_dle_estimate_by` estimates MAE / RMSE of a deployed regression model per chunk while the labels are not in yet. To fit the error models once and reuse them, run the same steps by hand:
+
+```sql
+FROM ml_dle_estimate_by('reference', 'production', week, y, forecast, [price, promo, dow]);
+
+-- the same by hand: store the error model, estimate later
+CREATE TABLE dle AS SELECT ml_fit_agg('LgbmRegressor', abs(y - forecast), [price, promo, dow, forecast]) AS mae_model FROM reference;
+SELECT week, avg(greatest(ml_predict(mae_model, [price, promo, dow, forecast]), 0)) AS estimated_mae FROM production, dle GROUP BY week;
 ```
 
 **Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:

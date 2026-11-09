@@ -82,3 +82,41 @@ SELECT count(*), bool_and(labels[prediction::INT + 1] = species), bool_and(label
 FROM ml_fit_predict_proba_by('iris', g, species, [a, b], 'DecisionTreeClassifier');
 ----
 90	true	true
+
+# Semi-supervised kinds: a NULL target marks an unlabelled row that still
+# takes part in the fit; -1 is never a class. Two blobs, 5 % labelled.
+statement ok
+CREATE TABLE ss AS SELECT i, (i % 2) AS truth, CASE WHEN i % 2 = 0 THEN 'left' ELSE 'right' END AS truth_label,
+    [(i % 2) * 6.0 + (hash(i) % 100) / 50.0, (hash(i, 'y') % 100) / 50.0] AS x,
+    i % 20 < 2 AS labelled
+FROM range(400) t(i);
+
+query IIII
+SELECT kind, ml_model_info(m).classes, ml_model_info(m).labels,
+       avg((ml_predict(m, x) = truth)::INT) FILTER (WHERE NOT labelled) > 0.95
+FROM (SELECT kind, ml_fit_agg(kind, CASE WHEN labelled THEN truth::DOUBLE END, x) AS m
+      FROM ss, (VALUES ('LabelPropagation'), ('LabelSpreading')) v(kind) GROUP BY kind) JOIN ss ON true
+GROUP BY ALL ORDER BY kind;
+----
+LabelPropagation	[0.0, 1.0]	[]	true
+LabelSpreading	[0.0, 1.0]	[]	true
+
+# VARCHAR targets: NULL = unlabelled; probabilities have one column per label
+query III
+SELECT ml_model_info(m).labels, len(ml_predict_proba(m, [6.5, 1.0])),
+       avg((ml_predict_label(m, x) = truth_label)::INT) FILTER (WHERE NOT labelled) > 0.95
+FROM (SELECT ml_fit_agg('LabelSpreading', CASE WHEN labelled THEN truth_label END, x) AS m FROM ss), ss
+GROUP BY ALL;
+----
+[left, right]	2	true
+
+query I
+SELECT ml_model_info(ml_fit_agg('SelfTrainingClassifier', CASE WHEN labelled THEN truth_label END, x, '{"estimator": "GaussianNB"}')).labels FROM ss;
+----
+[left, right]
+
+# other kinds still skip rows with a NULL target
+query I
+SELECT ml_model_info(ml_fit_agg('GaussianNB', CASE WHEN labelled THEN truth::DOUBLE END, x)).classes FROM ss;
+----
+[0.0, 1.0]

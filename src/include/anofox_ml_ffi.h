@@ -171,6 +171,10 @@ char *anofox_ml_spectral_embedding(const char *options, size_t n, const uint64_t
 
 char *anofox_ml_model_info(const uint8_t *model, size_t model_len, AnofoxMlModelInfo *out);
 
+// Whether `kind` fits on unlabelled rows (semi-supervised kinds): ml_fit_agg
+// then passes rows with a NULL target as y = -1, or as a NULL label.
+bool anofox_ml_accepts_unlabelled(const char *kind);
+
 char *anofox_ml_kinds(char **out);                                   // kinds separated by '\n'
 char *anofox_ml_default_params(const char *kind, char **out);        // JSON
 char *anofox_ml_estimators_json(char **out);                         // [{kind, default_params}]

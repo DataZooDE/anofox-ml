@@ -639,10 +639,13 @@ pub unsafe extern "C" fn anofox_ml_kneighbors(
     }
 }
 
-/// Continue training a fitted model BLOB on new rows (`DynModel::warm_start`),
-/// after merging the JSON `params` (e.g. a larger `n_estimators`); targets
-/// are numbers, or the model's string labels in `labels`.
-fn warm_start_impl(
+/// Continue training a fitted model BLOB on new rows, after merging the JSON
+/// `params`: `warm_start` (more stages / epochs, e.g. a larger
+/// `n_estimators`) or `partial_fit` (one more batch; no targets for the
+/// unsupervised kinds). Targets are numbers, or the model's string labels in
+/// `labels`.
+fn continue_training(
+    method: &str,
     blob: &[u8],
     params: &str,
     x: ArrayView2<f64>,
@@ -653,17 +656,12 @@ fn warm_start_impl(
     let (mut meta, bytes) = decode(blob)?;
     if meta.encoder.is_some() {
         return Err(format!(
-            "{} is an encoder and cannot be warm-started",
+            "{} is an encoder and cannot be trained further",
             meta.kind
         ));
     }
     let mut model = anofox_ml_registry::load(&meta.kind, bytes).map_err(|e| e.to_string())?;
-    if !model.capabilities().contains(&"warm_start") {
-        return Err(format!(
-            "{} does not support warm_start (gradient boosting, HistGradientBoosting and LGBM do)",
-            meta.kind
-        ));
-    }
+    require_method(&meta.kind, model.as_ref(), method)?;
     if x.ncols() != meta.n_features {
         return Err(format!(
             "{} was fitted on {} features, got {}",
@@ -673,7 +671,7 @@ fn warm_start_impl(
         ));
     }
     // Targets in the model's coding: label indices, and only known classes.
-    let codes: Vec<f64> = match (&meta.labels, labels, y) {
+    let codes: Option<Vec<f64>> = match (&meta.labels, labels, y) {
         (Some(known), Some(new), _) => new
             .iter()
             .map(|l| {
@@ -683,17 +681,19 @@ fn warm_start_impl(
                     .map(|i| i as f64)
                     .ok_or_else(|| format!("label '{l}' is not a label of the model ({known:?})"))
             })
-            .collect::<Result<_, _>>()?,
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)?,
         (Some(_), None, _) => {
             return Err("the model was fitted on VARCHAR labels; pass VARCHAR targets".into())
         }
         (None, Some(_), _) => {
             return Err("the model was fitted on numeric targets; pass DOUBLE targets".into())
         }
-        (None, None, Some(y)) => y.to_vec(),
-        (None, None, None) => return Err("warm start needs targets".into()),
+        (None, None, Some(y)) => Some(y.to_vec()),
+        (None, None, None) if method == "partial_fit" => None,
+        (None, None, None) => return Err(format!("{method} needs targets")),
     };
-    if let Some(classes) = &meta.classes {
+    if let (Some(classes), Some(codes)) = (&meta.classes, &codes) {
         if let Some(v) = codes.iter().find(|v| !classes.contains(v)) {
             return Err(format!("target {v} is not a class of the model"));
         }
@@ -703,10 +703,12 @@ fn warm_start_impl(
             serde_json::from_str(params).map_err(|e| format!("invalid params JSON: {e}"))?;
         model.set_params(&p).map_err(|e| e.to_string())?;
     }
-    // warm_start takes x and y with one lifetime: both owned here.
+    // The model's methods take x and y with one lifetime: both owned here.
     let x = x.to_owned();
-    run_fit(threads, || {
-        model.warm_start(x.view(), Some(ArrayView1::from(&codes)), None)
+    let y = codes.as_ref().map(ArrayView1::from);
+    run_fit(threads, || match method {
+        "warm_start" => model.warm_start(x.view(), y, None),
+        _ => model.partial_fit(x.view(), y, None, None),
     })?
     .map_err(|e| e.to_string())?;
     // Calibration scores belong to the old model.
@@ -714,7 +716,7 @@ fn warm_start_impl(
     Ok(encode(&meta, &model.to_bytes().map_err(|e| e.to_string())?))
 }
 
-/// Continue training `model` on `n_rows` new rows (see [`warm_start_impl`]):
+/// Continue training `model` on `n_rows` new rows (`warm_start`; see [`continue_training`]):
 /// targets `y` (doubles), or the string labels `y_labels` when `y` is NULL.
 ///
 /// # Safety
@@ -748,10 +750,10 @@ pub unsafe extern "C" fn anofox_ml_warm_start(
         let x = matrix(x, n_rows, n_cols)?;
         if y.is_null() {
             let labels = strings(y_labels, n_rows, "y")?;
-            warm_start_impl(blob, params, x, None, Some(&labels), threads)
+            continue_training("warm_start", blob, params, x, None, Some(&labels), threads)
         } else {
             let y = ArrayView1::from(std::slice::from_raw_parts(y, n_rows));
-            warm_start_impl(blob, params, x, Some(y), None, threads)
+            continue_training("warm_start", blob, params, x, Some(y), None, threads)
         }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
@@ -766,6 +768,64 @@ pub unsafe extern "C" fn anofox_ml_warm_start(
         }
         Ok(Err(e)) => err(e),
         Err(_) => err("internal error (panic) while warm-starting"),
+    }
+}
+
+/// Fold `n_rows` new rows into `model` as one more batch (`partial_fit`; see
+/// [`continue_training`]): targets `y` (doubles), the string labels
+/// `y_labels` when `y` is NULL, or none (both NULL) for the unsupervised kinds.
+///
+/// # Safety
+/// `model` holds `model_len` bytes, `x` `n_rows * n_cols` doubles, `y`
+/// `n_rows` doubles or `y_labels` `n_rows` NUL-terminated strings; `params`
+/// is NULL or NUL-terminated; `out` is writable.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn anofox_ml_partial_fit(
+    model: *const u8,
+    model_len: usize,
+    params: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    y: *const f64,
+    y_labels: *const *const c_char,
+    threads: usize,
+    out: *mut AnofoxMlBytes,
+) -> *mut c_char {
+    let run = || -> Result<Vec<u8>, String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let x = matrix(x, n_rows, n_cols)?;
+        if !y.is_null() {
+            let y = ArrayView1::from(std::slice::from_raw_parts(y, n_rows));
+            continue_training("partial_fit", blob, params, x, Some(y), None, threads)
+        } else if !y_labels.is_null() {
+            let labels = strings(y_labels, n_rows, "y")?;
+            continue_training("partial_fit", blob, params, x, None, Some(&labels), threads)
+        } else {
+            continue_training("partial_fit", blob, params, x, None, None, threads)
+        }
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            *out = AnofoxMlBytes {
+                data: b.as_mut_ptr(),
+                len: b.len(),
+            };
+            std::mem::forget(b);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while fitting a batch"),
     }
 }
 

@@ -8,6 +8,7 @@
 
 ### Added
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
+- `ml_partial_fit_agg`: incremental batches for naive Bayes, SGD, PassiveAggressive, MLP, the scalers and IncrementalPca; MLP warm start through `ml_warm_start_agg` (#17).
 - `ml_kneighbors(model, x [, k])`: nearest training rows of the kNN models (#16).
 - DuckDB 2.0 support: the same source builds and passes the tests against DuckDB v1.5.6 and v2.0.0; CI builds both and releases attach binaries for both (#66).
 - `ml_feature_importances(model)` for tree and boosting kinds; `n_iter`, `inertia` and `oob_score` in `ml_model_info` (#10).

@@ -1027,30 +1027,36 @@ void ConformalDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
 // ml_warm_start_agg (options = params). FUNCTION names the aggregate in errors.
 constexpr char kConformalize[] = "ml_conformalize_agg";
 constexpr char kWarmStart[] = "ml_warm_start_agg";
+constexpr char kPartialFit[] = "ml_partial_fit_agg";
 
-template <bool LABELS, const char *FUNCTION = kConformalize>
+// Without HAS_Y the inputs are (model, x [, options]) (ml_partial_fit_agg
+// of the unsupervised kinds).
+template <bool LABELS, const char *FUNCTION = kConformalize, bool HAS_Y = true>
 void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &state_vector, idx_t count) {
+    constexpr idx_t X = HAS_Y ? 2 : 1;
     UnifiedVectorFormat model_data, y_data, x_data, options_data, sdata;
-    if (input_count > 3) {
-        inputs[3].ToUnifiedFormat(count, options_data);
+    if (input_count > X + 1) {
+        inputs[X + 1].ToUnifiedFormat(count, options_data);
     }
     inputs[0].ToUnifiedFormat(count, model_data);
-    inputs[1].ToUnifiedFormat(count, y_data);
-    inputs[2].ToUnifiedFormat(count, x_data);
+    if (HAS_Y) {
+        inputs[1].ToUnifiedFormat(count, y_data);
+    }
+    inputs[X].ToUnifiedFormat(count, x_data);
     state_vector.ToUnifiedFormat(count, sdata);
     auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = compat::ListChild(inputs[2]);
+    auto &child = compat::ListChild(inputs[X]);
     UnifiedVectorFormat child_data;
-    child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), child_data);
+    child.ToUnifiedFormat(ListVector::GetListSize(inputs[X]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
     auto states = UnifiedVectorFormat::GetData<ConformalState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto mi = model_data.sel->get_index(i);
-        auto yi = y_data.sel->get_index(i);
+        auto yi = HAS_Y ? y_data.sel->get_index(i) : 0;
         auto xi = x_data.sel->get_index(i);
-        if (!model_data.validity.RowIsValid(mi) || !y_data.validity.RowIsValid(yi) ||
+        if (!model_data.validity.RowIsValid(mi) || (HAS_Y && !y_data.validity.RowIsValid(yi)) ||
             !x_data.validity.RowIsValid(xi) || HasNullElement(child_data, lists[xi])) {
             continue;
         }
@@ -1058,7 +1064,7 @@ void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, V
         if (s.n_rows == 0) {
             *s.model = models[mi].GetString();
             s.n_cols = entry.length;
-            if (input_count > 3) {
+            if (input_count > X + 1) {
                 auto oi = options_data.sel->get_index(i);
                 if (options_data.validity.RowIsValid(oi)) {
                     *s.options = UnifiedVectorFormat::GetData<string_t>(options_data)[oi].GetString();
@@ -1073,9 +1079,9 @@ void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, V
         for (idx_t j = 0; j < entry.length; j++) {
             s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
         }
-        if (LABELS) {
+        if (HAS_Y && LABELS) {
             s.labels->push_back(UnifiedVectorFormat::GetData<string_t>(y_data)[yi].GetString());
-        } else {
+        } else if (HAS_Y) {
             s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
         }
         s.n_rows++;
@@ -1110,9 +1116,12 @@ void ConformalCombine(Vector &source_vector, Vector &target_vector, AggregateInp
 
 //===--------------------------------------------------------------------===//
 // ml_warm_start_agg(model BLOB, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR]) -> BLOB
-// Continue training a boosting model on the group's rows.
+// ml_partial_fit_agg(model BLOB, [y DOUBLE | VARCHAR,] x DOUBLE[] [, params VARCHAR]) -> BLOB
+// Continue training a stored model on the group's rows: more boosting stages
+// / MLP epochs (warm start), or one more batch (partial fit).
 //===--------------------------------------------------------------------===//
-void WarmStartFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
+template <const char *FUNCTION, bool PARTIAL>
+void ContinueFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<ConformalState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
@@ -1121,18 +1130,18 @@ void WarmStartFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector
             FlatVector::SetNull(result, row, true);
             continue;
         }
-        CaptureUse("ml_warm_start_agg");
+        CaptureUse(FUNCTION);
         AnofoxMlBytes blob {nullptr, 0};
         std::vector<const char *> labels;
         for (const auto &l : *s.labels) {
             labels.push_back(l.c_str());
         }
         const bool has_labels = !s.labels->empty();
-        Check(anofox_ml_warm_start(reinterpret_cast<const uint8_t *>(s.model->data()), s.model->size(),
-                                   s.options->c_str(), s.x->data(), s.n_rows, s.n_cols,
-                                   has_labels ? nullptr : s.y->data(), has_labels ? labels.data() : nullptr,
-                                   FitThreads(aggr), &blob),
-              "ml_warm_start_agg");
+        auto run = PARTIAL ? anofox_ml_partial_fit : anofox_ml_warm_start;
+        Check(run(reinterpret_cast<const uint8_t *>(s.model->data()), s.model->size(), s.options->c_str(), s.x->data(),
+                  s.n_rows, s.n_cols, has_labels || s.y->empty() ? nullptr : s.y->data(),
+                  has_labels ? labels.data() : nullptr, FitThreads(aggr), &blob),
+              FUNCTION);
         compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
@@ -1612,12 +1621,35 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
             AggregateFunction f("ml_warm_start_agg", args, LogicalType(LogicalTypeId::BLOB),
                                 AggregateFunction::StateSize<ConformalState>, compat::StateInit<ConformalInitialize>,
                                 labels ? ConformalUpdate<true, kWarmStart> : ConformalUpdate<false, kWarmStart>,
-                                ConformalCombine<kWarmStart>, WarmStartFinalize, FunctionNullHandling::SPECIAL_HANDLING,
+                                ConformalCombine<kWarmStart>, ContinueFinalize<kWarmStart, false>, FunctionNullHandling::SPECIAL_HANDLING,
                                 nullptr, compat::AggregateBind<FitBind>, ConformalDestroy);
             warm_set.AddFunction(f);
         }
     }
     loader.RegisterFunction(warm_set);
+    AggregateFunctionSet partial_set("ml_partial_fit_agg");
+    for (idx_t form = 0; form < 3; form++) { // 0: DOUBLE y, 1: VARCHAR y, 2: no y
+        for (bool params : {false, true}) {
+            vector<LogicalType> args {LogicalType(LogicalTypeId::BLOB)};
+            if (form < 2) {
+                args.push_back(LogicalType(form == 1 ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE));
+            }
+            args.push_back(LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)));
+            if (params) {
+                args.push_back(LogicalType(LogicalTypeId::VARCHAR));
+            }
+            auto update = form == 0   ? ConformalUpdate<false, kPartialFit>
+                          : form == 1 ? ConformalUpdate<true, kPartialFit>
+                                      : ConformalUpdate<false, kPartialFit, false>;
+            AggregateFunction f("ml_partial_fit_agg", args, LogicalType(LogicalTypeId::BLOB),
+                                AggregateFunction::StateSize<ConformalState>,
+                                compat::StateInit<ConformalInitialize>, update, ConformalCombine<kPartialFit>, ContinueFinalize<kPartialFit, true>,
+                                FunctionNullHandling::SPECIAL_HANDLING, nullptr, compat::AggregateBind<FitBind>,
+                                ConformalDestroy);
+            partial_set.AddFunction(f);
+        }
+    }
+    loader.RegisterFunction(partial_set);
 
     child_list_t<LogicalType> importance_fields;
     importance_fields.emplace_back("feature", LogicalType(LogicalTypeId::INTEGER));

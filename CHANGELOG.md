@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Building from source needs Rust 1.88 (was 1.87), for the PerpetualBooster kinds (#47).
+
 ### Added
 - `ml_feature_importances(model)` for tree and boosting kinds; `n_iter`, `inertia` and `oob_score` in `ml_model_info` (#10).
 - `ml_predict_interval` / `ml_predict_set` for the conformal kinds: split, CV+ / jackknife+, normalised, CQR, Mondrian and classifier sets (#6). New aggregates `ml_set_coverage`, `ml_mean_set_size` and `ml_mean_pinball_loss`.
@@ -14,6 +17,7 @@
 - `ml_rfe_agg`: recursive feature elimination, matching scikit-learn's `RFE` (#18).
 - `ml_domain_classifier_drift_by`: multivariate drift per chunk by a domain classifier's cross-validated ROC AUC (#43).
 - `ml_dle_estimate_by`: direct loss estimation of MAE / RMSE per chunk without labels (#42).
+- PerpetualBooster: `PerpetualRegressor` / `PerpetualClassifier` (one `budget` parameter instead of learning rate and tree count), also as the base model of CQR (#47).
 - Semi-supervised fits: for `LabelPropagation`, `LabelSpreading` and `SelfTrainingClassifier`, rows with a NULL target are unlabelled rows of the fit instead of being skipped (#44).
 
 ## [0.1.0] - 2026-11-08

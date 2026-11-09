@@ -9,11 +9,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSL%201.1-blue.svg" alt="License: BSL 1.1"></a>
   <a href="https://duckdb.org"><img src="https://img.shields.io/badge/DuckDB-1.5.6-green.svg" alt="DuckDB"></a>
   <a href="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=main" alt="Build"></a>
-  <img src="https://img.shields.io/badge/estimators-144-brightgreen.svg" alt="144 estimators">
+  <img src="https://img.shields.io/badge/estimators-146-brightgreen.svg" alt="146 estimators">
   <img src="https://img.shields.io/badge/status-early%20development-orange.svg" alt="Status: early development">
 </p>
 
-A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 144 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
+A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 146 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
 > **Status: early development.** The functions below work and are tested. The remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
 
@@ -529,7 +529,7 @@ Pass the `kind` exactly as listed. `SELECT * FROM ml_estimators()` shows the def
 
 | Category | Kinds |
 |---|---|
-| **Trees & Ensembles** | `DecisionTreeClassifier`, `DecisionTreeRegressor`, `RandomForestClassifier`, `RandomForestRegressor`, `ExtraTreesClassifier`, `ExtraTreesRegressor`, `GradientBoostingClassifier`, `GradientBoostingRegressor`, `HistGradientBoostingClassifier`, `HistGradientBoostingRegressor`, `LgbmClassifier`, `LgbmRegressor`, `AdaBoostClassifier`, `AdaBoostRegressor`, `BaggingClassifier`, `BaggingRegressor`, `CatBoostClassifier`, `CatBoostRegressor` |
+| **Trees & Ensembles** | `DecisionTreeClassifier`, `DecisionTreeRegressor`, `RandomForestClassifier`, `RandomForestRegressor`, `ExtraTreesClassifier`, `ExtraTreesRegressor`, `GradientBoostingClassifier`, `GradientBoostingRegressor`, `HistGradientBoostingClassifier`, `HistGradientBoostingRegressor`, `LgbmClassifier`, `LgbmRegressor`, `AdaBoostClassifier`, `AdaBoostRegressor`, `BaggingClassifier`, `BaggingRegressor`, `CatBoostClassifier`, `CatBoostRegressor`, `PerpetualRegressor`, `PerpetualClassifier` |
 | **SVM** | `Svc`, `Svr`, `NuSvc`, `NuSvr`, `LinearSvc`, `LinearSvr` |
 | **Neighbours** | `KnnClassifier`, `KnnRegressor`, `RadiusNeighborsClassifier`, `RadiusNeighborsRegressor`, `NearestCentroid`, `KNeighborsTransformer` |
 | **Naive Bayes** | `GaussianNB`, `BernoulliNB`, `MultinomialNB`, `ComplementNB`, `CategoricalNB` |
@@ -582,7 +582,7 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 ### Prerequisites
 
 - C++17 compiler, CMake ≥ 3.20, Make or Ninja
-- Rust toolchain (stable)
+- Rust ≥ 1.88 (the PerpetualBooster kinds need it)
 
 ### Build and Test
 

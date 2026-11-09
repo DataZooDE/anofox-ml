@@ -60,7 +60,7 @@ char *anofox_ml_predict_labels(const uint8_t *model, size_t model_len, const dou
 char *anofox_ml_predict(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
                         AnofoxMlDoubles *out);
 
-// Apply `method` (predict, predict_proba, decision_function, transform,
+// Apply `method` (predict, predict_std, predict_proba, decision_function, transform,
 // transform_y, inverse_transform, score_samples, staged_predict) to n_rows
 // rows of x (of Y for transform_y); `out` receives
 // n_rows * out_cols doubles, row-major.

@@ -63,8 +63,9 @@ struct Meta {
 type CachedModel = Option<(u64, usize, Meta, Box<dyn DynModel>)>;
 
 /// Prediction methods callable through [`anofox_ml_apply`].
-const METHODS: [&str; 9] = [
+const METHODS: [&str; 10] = [
     "predict",
+    "predict_std",
     "predict_proba",
     "predict_log_proba",
     "decision_function",
@@ -391,6 +392,7 @@ fn run_method(
     let out = POOL.with(|p| {
         p.install(|| match method {
             "predict" => model.predict(x),
+            "predict_std" => model.predict_std(x),
             "predict_proba" => model.predict_proba(x),
             // Native where the estimator has it (finite where predict_proba
             // underflows); otherwise ln of the probabilities (0 gives -inf).
@@ -1266,6 +1268,9 @@ fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>
                 ))
             }
             ("transform_y", _) => {}
+            // Takes the transformed width (components, one-hot columns),
+            // which the model checks itself.
+            ("inverse_transform", _) => {}
             _ => check_width(meta, x)?,
         }
         run_method(model, method, x)
@@ -1344,7 +1349,9 @@ pub unsafe extern "C" fn anofox_ml_predict(
         let blob = std::slice::from_raw_parts(model, model_len);
         match apply_impl(blob, "predict", matrix(x, n_rows, n_cols)?)? {
             (v, 1) => Ok(v),
-            (_, cols) => Err(format!("predict returned {cols} columns")),
+            (_, cols) => Err(format!(
+                "the model predicts {cols} targets per row; use ml_predict_targets"
+            )),
         }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {

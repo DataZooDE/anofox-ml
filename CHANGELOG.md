@@ -3,11 +3,16 @@
 ## [Unreleased]
 
 ### Changed
+- `ml_inverse_transform` no longer rejects inputs of the transformed width (PCA components, one-hot columns); the model checks the width itself (#11).
 - anofox-ml 0.5: 188 estimator kinds (from 144), among them voting / stacking / calibration / transformed-target / multi-output meta-estimators, Gaussian processes, PLS / CCA, multi-task lasso, LARS CV, text vectorizers and more. Stored models from 0.2 and 0.4 load and predict identically. `ml_predict_log_proba` is native where the estimator has it (finite where probabilities underflow).
 - Building from source needs Rust 1.88 (was 1.87), for the PerpetualBooster kinds (#47).
 
 ### Added
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
+- Multi-target kinds (`MultiOutputRegressor`, `RegressorChain`, `MultiTaskLasso`, …) fitted on `[X | Y]` with `y_columns`, and `ml_predict_targets(model, x)` for their per-target predictions (#11).
+- `ml_predict_std(model, x)`: predictive standard deviation of `GaussianProcessRegressor` (#11).
+- `OlsRegressor` / `RidgeRegressor` with `inference: true`: prediction intervals through `ml_predict_interval` and the coefficient table in `ml_model_fitted` (#11).
+- Tests for the new kinds `LassoLarsIC`, `BinomialRegressor`, `IsotonicRegressor`, `GaussianProcessClassifier`, numeric `OneHotEncoder` and `BaggingEstimator*` (#11).
 - GLM offsets / exposure: `ml_fit_with_offset_agg(kind, y, x, offset [, params [, weight]])` and `ml_predict(model, x, offset)` for Poisson, Gamma, Tweedie and Binomial regression (#18).
 - `ml_transform_y(model, y)`: Y scores of `Cca`, `PlsCanonical` and `PlsSvd`. Models fitted on `[X | Y]` (`y_columns`) store the width of X, so `ml_transform` / `ml_predict` take X alone (#18).
 - The feature selection kinds `Rfe`, `Rfecv` and `SequentialFeatureSelector` (nested estimator) work through `ml_fit_agg` / `ml_transform`, matching scikit-learn (#18).

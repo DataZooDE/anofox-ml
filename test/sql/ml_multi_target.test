@@ -1,0 +1,193 @@
+# name: test/sql/ml_multi_target.test
+# description: multi-target kinds (y_columns), Gaussian process std, new 0.5 kinds, inference intervals
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# Two linear targets with small noise.
+statement ok
+CREATE TABLE t AS SELECT i, (i % 7)::DOUBLE AS x1, ((i * 5) % 11)::DOUBLE AS x2,
+    1 + 2 * (i % 7) - ((i * 5) % 11) + ((hash(i) % 100) / 100.0 - 0.5) * 0.2 AS y1,
+    3 - (i % 7) + 0.5 * ((i * 5) % 11) + ((hash(i, 'b') % 100) / 100.0 - 0.5) * 0.2 AS y2
+FROM range(60) t(i);
+
+# Fitted on [X | Y] with y_columns = 2 (the default of these kinds); predicted from X alone.
+# Values from scikit-learn: MultiOutputRegressor(LinearRegression()), RegressorChain(order=[1, 0]),
+# MultiTaskLasso(alpha=0.1), MultiTaskElasticNet(alpha=0.1), all .predict([[2, 3]]).
+query III
+SELECT k, ml_model_info(m).n_features, list_transform(ml_predict_targets(m, [2.0, 3.0]), lambda v: round(v, 6)) FROM (
+    SELECT 'MultiOutputRegressor' AS k, ml_fit_agg('MultiOutputRegressor', list_concat([x1, x2], [y1, y2])) AS m FROM t
+    UNION ALL SELECT 'RegressorChain', ml_fit_agg('RegressorChain', [x1, x2, y1, y2], '{"order": [1, 0], "y_columns": 2}') FROM t
+    UNION ALL SELECT 'MultiTaskLasso', ml_fit_agg('MultiTaskLasso', [x1, x2, y1, y2], '{"alpha": 0.1}') FROM t
+    UNION ALL SELECT 'MultiTaskElasticNet', ml_fit_agg('MultiTaskElasticNet', [x1, x2, y1, y2], '{"alpha": 0.1}') FROM t)
+ORDER BY k;
+----
+MultiOutputRegressor	2	[1.994873, 2.510671]
+MultiTaskElasticNet	2	[2.007691, 2.504336]
+MultiTaskLasso	2	[1.996929, 2.509695]
+RegressorChain	2	[1.994873, 2.510671]
+
+# a nested estimator per target
+query I
+SELECT ml_r2(y2, ml_predict_targets(m, [x1, x2])[2]) > 0.99 FROM t,
+    (SELECT ml_fit_agg('MultiOutputRegressor', [x1, x2, y1, y2],
+        '{"estimator": "RidgeRegressor", "estimator_params": {"lambda": 0.01}}') AS m FROM t) mm;
+----
+true
+
+statement error
+SELECT ml_predict(ml_fit_agg('MultiOutputRegressor', [x1, x2, y1, y2]), [2.0, 3.0]) FROM t;
+----
+the model predicts 2 targets per row; use ml_predict_targets
+
+statement error
+SELECT ml_predict_targets(m, [x1, x2, y1, y2]) FROM t, (SELECT ml_fit_agg('MultiOutputRegressor', [x1, x2, y1, y2]) AS m FROM t) mm;
+----
+MultiOutputRegressor was fitted on 2 features, got 4
+
+statement error
+SELECT ml_fit_agg('MultiOutputRegressor', [x1, x2]) FROM t;
+----
+y_columns must be in 1..2
+
+# PlsRegression takes a single target y; scikit-learn PLSRegression(n_components=1) gives 1.968597
+query II
+SELECT round(ml_predict(m, [2.0, 3.0]), 6), ml_predict_targets(m, [2.0, 3.0]) = [ml_predict(m, [2.0, 3.0])]
+FROM (SELECT ml_fit_agg('PlsRegression', y1, [x1, x2], '{"n_components": 1}') AS m FROM t);
+----
+1.968597	true
+
+# Gaussian process (fixed 1.0 * RBF(1.0)) on one point (0, 1): mean exp(-x^2 / 2), std sqrt(1 - exp(-x^2))
+query II
+SELECT abs(ml_predict(m, [1.0]) - exp(-0.5)) < 1e-9, abs(ml_predict_std(m, [1.0]) - sqrt(1 - exp(-1))) < 1e-9
+FROM (SELECT ml_fit_agg('GaussianProcessRegressor', 1.0, [0.0]) AS m);
+----
+true	true
+
+# on sin(x): interpolates the training points with a small std, which grows between them and far away
+statement ok
+CREATE TABLE gp AS SELECT i / 2.0 AS x, sin(i / 2.0) AS y FROM range(10) t(i);
+
+statement ok
+CREATE TABLE gpm AS SELECT ml_fit_agg('GaussianProcessRegressor', y, [x]) AS m FROM gp;
+
+query III
+SELECT max(abs(ml_predict(m, [x]) - y)) < 1e-6, max(ml_predict_std(m, [x])) < 1e-3,
+       min(ml_predict_std(m, [x + 0.25])) > max(ml_predict_std(m, [x]))
+FROM gp, gpm WHERE x < 4.5;
+----
+true	true	true
+
+query I
+SELECT ml_predict_std(m, [10.0]) > 0.99 FROM gpm;
+----
+true
+
+statement error
+SELECT ml_predict_std(ml_fit_agg('OlsRegressor', y, [x]), [1.0]) FROM gp;
+----
+OlsRegressor does not support predict_std
+
+# LassoLarsIC (AIC) drops the irrelevant feature
+statement ok
+CREATE TABLE cl AS SELECT (i % 10)::DOUBLE AS x, ((i * 3) % 7)::DOUBLE AS z, ((i * 7) % 5)::DOUBLE AS u,
+    CASE WHEN (i % 10) + 0.3 * ((i * 3) % 7) > 5.5 THEN 1.0 ELSE 0.0 END AS y
+FROM range(100) t(i);
+
+query I
+SELECT list_transform(ml_coefficients(ml_fit_agg('LassoLarsIC', 2 * x - z, [x, z, u])).coef[1], lambda v: round(v, 6)) FROM cl;
+----
+[2.0, -1.0, 0.0]
+
+# BinomialRegressor: proportions with trial counts as weights
+query I
+SELECT round(ml_predict(ml_fit_agg('BinomialRegressor', 1.0 / (1 + exp(-(-1 + (i % 20) / 10.0))), [(i % 20) / 10.0], '{}',
+    (1 + i % 5)::DOUBLE), [1.0]), 6) FROM range(200) t(i);
+----
+0.5
+
+# IsotonicRegressor (one feature), as scikit-learn IsotonicRegression: pooled 3 / 2 and 6 / 5, NaN out of range
+statement ok
+CREATE TABLE iso AS SELECT * FROM (VALUES (1.0, 1.0), (2.0, 3.0), (3.0, 2.0), (4.0, 4.0), (5.0, 6.0), (6.0, 5.0)) v(x, y);
+
+query II
+SELECT q, ml_predict(m, [q]) FROM (SELECT ml_fit_agg('IsotonicRegressor', y, [x]) AS m FROM iso),
+    (VALUES (1.0), (2.5), (3.0), (4.5), (7.0)) v(q) ORDER BY q;
+----
+1.0	1.0
+2.5	2.5
+3.0	2.5
+4.5	4.75
+7.0	nan
+
+statement error
+SELECT ml_fit_agg('IsotonicRegressor', y, [x, x]) FROM iso;
+----
+exactly one feature column
+
+# GaussianProcessClassifier, and bagging over any registered kind
+query III
+SELECT avg((ml_predict(m, [x, z]) = y)::INT) >= 0.95, min(list_sum(ml_predict_proba(m, [x, z]))) > 1 - 1e-9,
+       max(list_sum(ml_predict_proba(m, [x, z]))) < 1 + 1e-9
+FROM cl, (SELECT ml_fit_agg('GaussianProcessClassifier', y, [x, z]) AS m FROM cl);
+----
+true	true	true
+
+query II
+SELECT avg((ml_predict(c, [x, z]) = y)::INT) >= 0.95, ml_r2(2 * x - z, ml_predict(r, [x, z])) > 1 - 1e-9
+FROM cl, (SELECT ml_fit_agg('BaggingEstimatorClassifier', y, [x, z], '{"estimator": "LogisticRegressor", "n_estimators": 5}') AS c,
+                 ml_fit_agg('BaggingEstimatorRegressor', 2 * x - z, [x, z], '{"estimator": "OlsRegressor"}') AS r FROM cl);
+----
+true	true
+
+# OneHotEncoder on numeric category codes (VARCHAR categories use the extension's own encoder)
+statement ok
+CREATE TABLE oh AS SELECT ml_fit_agg('OneHotEncoder', [a, b]) AS m FROM (VALUES (1.0, 10.0), (2.0, 20.0), (3.0, 10.0), (2.0, 30.0)) v(a, b);
+
+query II
+SELECT ml_transform(m, [2.0, 30.0]), ml_inverse_transform(m, ml_transform(m, [3.0, 20.0])) FROM oh;
+----
+[0.0, 1.0, 0.0, 0.0, 0.0, 1.0]	[3.0, 20.0]
+
+# ml_inverse_transform takes the transformed width (here one PCA component)
+query I
+SELECT max(abs(ml_inverse_transform(m, ml_transform(m, [i::DOUBLE, 2.0 * i]))[2] - 2.0 * i)) < 1e-9
+FROM range(20) t(i), (SELECT ml_fit_agg('Pca', [i::DOUBLE, 2.0 * i], '{"n_components": 1}') AS m FROM range(20) t(i));
+----
+true
+
+statement error
+SELECT ml_inverse_transform(m, [1.0]) FROM oh;
+----
+expected 6 one-hot columns, got 1
+
+# Full linear fits: OLS / ridge with inference give prediction intervals and the coefficient table.
+# y = 1 + 2x + N(0, 1); train on the first half, test on the second.
+statement ok
+CREATE TABLE n AS SELECT i, (i % 50) / 5.0 AS x,
+    1 + 2 * ((i % 50) / 5.0) + sqrt(-2 * ln((hash(i) % 100000 + 1) / 100001.0)) * cos(2 * pi() * (hash(i, 'u') % 100000) / 100000.0) AS y
+FROM range(4000) t(i);
+
+query III
+SELECT k, abs(avg((y BETWEEN pi.lower AND pi.upper)::INT) - 0.95) < 0.02, abs(avg(pi.upper - pi.lower) - 2 * 1.96) < 0.2
+FROM (SELECT k, y, ml_predict_interval(m, [x], 0.05) AS pi FROM n, (
+    SELECT 'OlsRegressor' AS k, ml_fit_agg('OlsRegressor', y, [x], '{"inference": true}') AS m FROM n WHERE i < 2000
+    UNION ALL SELECT 'RidgeRegressor', ml_fit_agg('RidgeRegressor', y, [x], '{"inference": true, "lambda": 0.1}') FROM n WHERE i < 2000)
+    WHERE i >= 2000)
+GROUP BY k ORDER BY k;
+----
+OlsRegressor	true	true
+RidgeRegressor	true	true
+
+query I
+SELECT ml_model_fitted(ml_fit_agg('OlsRegressor', y, [x], '{"inference": true}')) LIKE '%"summary":{"coefficients":%"std_errors":%"p_values":%' FROM n;
+----
+true
+
+statement error
+SELECT ml_predict_interval(ml_fit_agg('OlsRegressor', y, [x]), [1.0], 0.05) FROM n;
+----
+only available for a model fitted with inference: true

@@ -1,6 +1,7 @@
 // SQL functions of the anofox_ml extension: thin wrappers over the generic
 // C ABI in anofox_ml_ffi.h (estimator registry of anofox-ml).
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -1124,7 +1125,8 @@ void MlModelFittedFunction(DataChunk &args, ExpressionState &state, Vector &resu
 
 //===--------------------------------------------------------------------===//
 // Fitted arrays: ml_coefficients(model) -> STRUCT(coef DOUBLE[][], intercept DOUBLE[]),
-// ml_cluster_centers(model) -> DOUBLE[][], ml_explained_variance_ratio(model) -> DOUBLE[]
+// ml_cluster_centers(model) -> DOUBLE[][], ml_explained_variance_ratio(model) -> DOUBLE[],
+// ml_feature_importances(model) -> DOUBLE[]
 //===--------------------------------------------------------------------===//
 // Read a fitted array; false when `optional` and the model has none.
 bool ModelArray(const char *function, string_t blob, const char *keys, bool optional, std::vector<double> &data,
@@ -1211,6 +1213,15 @@ void MlClusterCentersFunction(DataChunk &args, ExpressionState &, Vector &result
     });
 }
 
+void MlFeatureImportancesFunction(DataChunk &args, ExpressionState &, Vector &result) {
+    ModelValueFunction(args, result, [](string_t blob) {
+        std::vector<double> data;
+        size_t r = 0, c = 0;
+        ModelArray("ml_feature_importances", blob, "feature_importances", false, data, r, c);
+        return ListValue(data);
+    });
+}
+
 void MlExplainedVarianceRatioFunction(DataChunk &args, ExpressionState &, Vector &result) {
     ModelValueFunction(args, result, [](string_t blob) {
         std::vector<double> data;
@@ -1222,7 +1233,8 @@ void MlExplainedVarianceRatioFunction(DataChunk &args, ExpressionState &, Vector
 
 //===--------------------------------------------------------------------===//
 // ml_model_info(model BLOB) -> STRUCT(kind, n_features, classes, capabilities,
-//                                     params, format_version, crate_version)
+//                                     params, format_version, crate_version, labels,
+//                                     n_iter, inertia, oob_score)
 //===--------------------------------------------------------------------===//
 LogicalType ModelInfoType() {
     child_list_t<LogicalType> fields;
@@ -1234,6 +1246,9 @@ LogicalType ModelInfoType() {
     fields.emplace_back("format_version", LogicalType(LogicalTypeId::INTEGER));
     fields.emplace_back("crate_version", LogicalType(LogicalTypeId::VARCHAR));
     fields.emplace_back("labels", LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)));
+    fields.emplace_back("n_iter", LogicalType(LogicalTypeId::BIGINT));
+    fields.emplace_back("inertia", LogicalType(LogicalTypeId::DOUBLE));
+    fields.emplace_back("oob_score", LogicalType(LogicalTypeId::DOUBLE));
     return LogicalType::STRUCT(std::move(fields));
 }
 
@@ -1283,6 +1298,11 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
             labels.push_back(Value(info.labels.data[j]));
         }
         fields.emplace_back("labels", Value::LIST(LogicalType(LogicalTypeId::VARCHAR), std::move(labels)));
+        fields.emplace_back("n_iter", std::isnan(info.n_iter) ? Value(LogicalType(LogicalTypeId::BIGINT))
+                                                              : Value::BIGINT(static_cast<int64_t>(info.n_iter)));
+        auto nullable = [](double v) { return std::isnan(v) ? Value(LogicalType(LogicalTypeId::DOUBLE)) : Value::DOUBLE(v); };
+        fields.emplace_back("inertia", nullable(info.inertia));
+        fields.emplace_back("oob_score", nullable(info.oob_score));
         anofox_ml_free_model_info(info);
         result.SetValue(i, Value::STRUCT(std::move(fields)));
     }
@@ -1305,6 +1325,8 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                                            MlClusterCentersFunction));
     loader.RegisterFunction(ScalarFunction("ml_explained_variance_ratio", {BL}, LogicalType::LIST(DL),
                                            MlExplainedVarianceRatioFunction));
+    loader.RegisterFunction(
+        ScalarFunction("ml_feature_importances", {BL}, LogicalType::LIST(DL), MlFeatureImportancesFunction));
     loader.RegisterFunction(
         ScalarFunction("ml_model_fitted", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelFittedFunction));
     const vector<LogicalType> model_and_x {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};

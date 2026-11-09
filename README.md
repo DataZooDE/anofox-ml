@@ -198,7 +198,7 @@ SELECT kind, default_params FROM ml_estimators();
 
 | Function | Description |
 |---|---|
-| `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
+| `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) and `capabilities` (its methods, e.g. `predict_proba`, `transform`, `feature_importances`). `SELECT kind FROM ml_estimators() WHERE list_contains(capabilities, 'predict_proba')` lists the probabilistic classifiers |
 | `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `y` is `DOUBLE`, or `VARCHAR` class labels for classifiers. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
 | `ml_warm_start_agg(model, y, [x1, x2, …] [, params])` | Aggregate: continue training a stored boosting model (gradient boosting, HGB, LGBM) on the group's rows, after merging `params` (e.g. a larger `n_estimators`). On the same rows, 100 trees warm-started to 200 equal a 200-tree fit. Targets must be classes / labels the model knows |
 | `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |

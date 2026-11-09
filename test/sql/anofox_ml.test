@@ -560,3 +560,24 @@ statement error
 SELECT ml_warm_start_agg(m, y, [a, b], '{"n_trees": 5}') FROM (SELECT ml_fit_agg('GradientBoostingRegressor', y, [a, b], '{"n_estimators": 5}') AS m FROM ws), ws GROUP BY m;
 ----
 n_trees
+
+# ml_estimators lists each kind's methods; a missing method names the kinds that have it
+query II
+SELECT list_contains(capabilities, 'predict_proba'), list_contains(capabilities, 'feature_importances') FROM ml_estimators() WHERE kind = 'RandomForestClassifier';
+----
+true	true
+
+query I
+SELECT bool_and(len(capabilities) > 0) FROM ml_estimators();
+----
+true
+
+statement error
+SELECT ml_predict_proba(ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE]), [1.0]) FROM range(5) t(i);
+----
+OlsRegressor does not support predict_proba (it supports: predict). 
+
+statement error
+SELECT ml_staged_predict(ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE]), [1.0]) FROM range(5) t(i);
+----
+WHERE list_contains(capabilities, 'staged_predict')

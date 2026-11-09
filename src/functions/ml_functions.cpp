@@ -75,7 +75,7 @@ void MlModelKindFunction(DataChunk &args, ExpressionState &state, Vector &result
 }
 
 //===--------------------------------------------------------------------===//
-// ml_estimators() -> TABLE(kind VARCHAR, default_params VARCHAR)
+// ml_estimators() -> TABLE(kind VARCHAR, default_params VARCHAR, capabilities VARCHAR[])
 //===--------------------------------------------------------------------===//
 struct EstimatorsState : public GlobalTableFunctionState {
     std::vector<std::string> kinds;
@@ -84,8 +84,9 @@ struct EstimatorsState : public GlobalTableFunctionState {
 
 unique_ptr<FunctionData> EstimatorsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
                                         vector<string> &names) {
-    names = {"kind", "default_params"};
-    types = {LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::VARCHAR)};
+    names = {"kind", "default_params", "capabilities"};
+    types = {LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::VARCHAR),
+             LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR))};
     return nullptr;
 }
 
@@ -115,6 +116,19 @@ void EstimatorsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
         Check(anofox_ml_default_params(kind.c_str(), &params), "ml_estimators");
         output.SetValue(0, count, Value(kind));
         output.SetValue(1, count, Value(TakeString(params)));
+        char *caps = nullptr;
+        Check(anofox_ml_kind_capabilities(kind.c_str(), &caps), "ml_estimators");
+        vector<Value> list;
+        std::string all = TakeString(caps);
+        for (size_t start = 0; start < all.size();) {
+            size_t end = all.find('\n', start);
+            if (end == std::string::npos) {
+                end = all.size();
+            }
+            list.push_back(Value(all.substr(start, end - start)));
+            start = end + 1;
+        }
+        output.SetValue(2, count, Value::LIST(LogicalType(LogicalTypeId::VARCHAR), std::move(list)));
         count++;
     }
     output.SetCardinality(count);

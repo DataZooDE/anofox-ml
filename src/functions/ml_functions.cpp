@@ -570,6 +570,61 @@ void TuneFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result
 }
 
 //===--------------------------------------------------------------------===//
+// ml_rfe_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR [, options VARCHAR]])
+//   -> STRUCT(support BOOLEAN[], ranking INTEGER[], model BLOB)
+// Recursive feature elimination; model is fitted on the selected features.
+//===--------------------------------------------------------------------===//
+template <bool LABELS>
+void RfeUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
+    if (input_count >= 5) {
+        TuneUpdate<LABELS>(inputs, aggr, input_count, state_vector, count);
+    } else {
+        FitUpdate<true, false, LABELS, false>(inputs, aggr, input_count, state_vector, count);
+    }
+}
+
+LogicalType RfeType() {
+    child_list_t<LogicalType> fields;
+    fields.emplace_back("support", LogicalType::LIST(LogicalType(LogicalTypeId::BOOLEAN)));
+    fields.emplace_back("ranking", LogicalType::LIST(LogicalType(LogicalTypeId::INTEGER)));
+    fields.emplace_back("model", LogicalType(LogicalTypeId::BLOB));
+    return LogicalType::STRUCT(std::move(fields));
+}
+
+void RfeFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_rfe_agg");
+        std::vector<const char *> labels;
+        for (const auto &l : *s.labels) {
+            labels.push_back(l.c_str());
+        }
+        AnofoxMlRfeResult r {};
+        Check(anofox_ml_rfe(s.kind->c_str(), s.params->c_str(), s.options->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                            s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
+                            FitThreads(aggr), &r),
+              "ml_rfe_agg");
+        vector<Value> support, ranking;
+        for (size_t j = 0; j < r.support.len; j++) {
+            support.push_back(Value::BOOLEAN(r.support.data[j] != 0));
+            ranking.push_back(Value::INTEGER(static_cast<int32_t>(r.ranking.data[j])));
+        }
+        child_list_t<Value> fields;
+        fields.emplace_back("support", Value::LIST(LogicalType(LogicalTypeId::BOOLEAN), std::move(support)));
+        fields.emplace_back("ranking", Value::LIST(LogicalType(LogicalTypeId::INTEGER), std::move(ranking)));
+        fields.emplace_back("model", Value::BLOB(reinterpret_cast<const_data_ptr_t>(r.model.data), r.model.len));
+        anofox_ml_free_rfe_result(r);
+        result.SetValue(row, Value::STRUCT(std::move(fields)));
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_cluster_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BIGINT[]
 // ml_outlier_score_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> DOUBLE[]
 // Fit on the group and return one value per input row, in input order (use
@@ -1585,6 +1640,21 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         }
     }
     loader.RegisterFunction(tune_set);
+    AggregateFunctionSet rfe_set("ml_rfe_agg");
+    for (bool labels : {false, true}) {
+        for (idx_t extra = 0; extra <= 2; extra++) {
+            vector<LogicalType> args {V, LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE), features};
+            for (idx_t e = 0; e < extra; e++) {
+                args.push_back(V); // params, options
+            }
+            AggregateFunction f("ml_rfe_agg", args, RfeType(), AggregateFunction::StateSize<FitState>, FitInitialize,
+                                labels ? RfeUpdate<true> : RfeUpdate<false>, FitCombine, RfeFinalize, nullptr, FitBind,
+                                FitDestroy);
+            f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+            rfe_set.AddFunction(f);
+        }
+    }
+    loader.RegisterFunction(rfe_set);
     // Categorical encoders on VARCHAR features.
     const auto string_features = LogicalType::LIST(V);
     fit_set.AddFunction(make_fit({V, string_features}, EncodeUpdate));

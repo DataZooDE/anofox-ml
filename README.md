@@ -216,6 +216,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_fit_transform_agg(kind, [y,] [x1, x2, …] [, params [, weight]])` | Aggregate: fit on the group and return each row's output (`DOUBLE[][]`): the training embedding of t-SNE, Isomap, LLE and MDS, TargetEncoder's cross-fitted encoding, or `transform` of the training rows |
 | `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version`, `crate_version`, `labels` (string class labels), and the training statistics `n_iter`, `inertia` (KMeans) and `oob_score` (forests with `oob_score: true`), NULL where the model has none |
 | `ml_permutation_importance_agg(model, y, [x1, x2, …] [, options])` | Aggregate over evaluation rows: `STRUCT(feature, importance_mean, importance_std)[]`, the drop in a metric when feature `feature` (1-based, as in `x[feature]`) is shuffled. Options: `metric` (any metric aggregate name; default `accuracy` for classifiers, `r2` otherwise; losses are negated so higher = more important), `metric_options`, `n_repeats` (5), `seed` |
+| `ml_rfe_agg(kind, y, [x1, x2, …] [, params [, options]])` | Aggregate: recursive feature elimination, as scikit-learn's `RFE`. Each round fits `kind` and drops the `step` weakest features (by `feature_importances`, or by the absolute coefficients) until `n_features_to_select` remain (default: half; counts or fractions). Returns `STRUCT(support BOOLEAN[], ranking INTEGER[], model BLOB)`; `model` is fitted on the selected features, in their original order |
 | `ml_mutual_info_agg(y, [x1, x2, …] [, options])` | Aggregate: mutual information (nats) between each feature and `y`, as scikit-learn's `mutual_info_regression` / `mutual_info_classif` (`DOUBLE[]`). `y` may be `VARCHAR`. Options: `discrete_target`, `discrete_features` (`"auto"`, `true` or 1-based positions), `n_neighbors` (3), `seed` |
 | `ml_covariance_agg([x1, x2, …] [, options])` | Aggregate: `STRUCT(covariance DOUBLE[][], shrinkage, location DOUBLE[])`, as scikit-learn. `method` = `"ledoit_wolf"` (default), `"oas"`, `"empirical"`, `"shrunk"` (with `shrinkage`, default 0.1) or `"mcd"` (robust minimum covariance determinant; `support_fraction`, `seed`; `shrinkage` is NULL) |
 | `ml_covariance(model)` | `STRUCT(location, covariance, precision)` of a fitted covariance estimator (`EmpiricalCovariance`, `ShrunkCovariance`, `LedoitWolf`, `Oas`, `MinCovDet`, `EllipticEnvelope`) |
@@ -474,6 +475,16 @@ UPDATE models SET model = w.model
 FROM (SELECT store, ml_warm_start_agg(m.model, units, [price, dow], '{"n_estimators": 300}') AS model
       FROM new_rows JOIN models m USING (store) GROUP BY store, m.model) w
 WHERE models.store = w.store;
+```
+
+**Selecting features.** `ml_rfe_agg` eliminates features recursively. To select by a threshold on importances (scikit-learn's `SelectFromModel`), filter `ml_feature_importances` in SQL:
+
+```sql
+SELECT ml_rfe_agg('OlsRegressor', y, [x1, x2, x3, x4, x5], '{}', '{"n_features_to_select": 2}').support FROM train;
+
+-- SelectFromModel(threshold="mean")
+SELECT list_filter(range(1, len(fi) + 1), lambda j: fi[j] >= list_avg(fi)) AS selected
+FROM (SELECT ml_feature_importances(ml_fit_agg('RandomForestRegressor', y, [x1, x2, x3, x4, x5])) AS fi FROM train);
 ```
 
 **Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:

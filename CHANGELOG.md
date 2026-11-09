@@ -6,6 +6,7 @@
 - Building from source needs Rust 1.88 (was 1.87), for the PerpetualBooster kinds (#47).
 
 ### Added
+- DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
 - DuckDB 2.0 support: the same source builds and passes the tests against DuckDB v1.5.6 and v2.0.0; CI builds both and releases attach binaries for both (#66).
 - `ml_feature_importances(model)` for tree and boosting kinds; `n_iter`, `inertia` and `oob_score` in `ml_model_info` (#10).
 - `ml_predict_interval` / `ml_predict_set` for the conformal kinds: split, CV+ / jackknife+, normalised, CQR, Mondrian and classifier sets (#6). New aggregates `ml_set_coverage`, `ml_mean_set_size` and `ml_mean_pinball_loss`.

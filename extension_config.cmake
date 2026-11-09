@@ -18,8 +18,24 @@ if (GIT_FOUND)
     endif()
 endif()
 
-if (ANOFOX_ML_EXT_VERSION STREQUAL "")
-    duckdb_extension_load(anofox_ml SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR} LOAD_TESTS)
-else()
-    duckdb_extension_load(anofox_ml SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR} LOAD_TESTS EXTENSION_VERSION ${ANOFOX_ML_EXT_VERSION})
+# On WASM the extension is a static library and the final .wasm comes from a
+# post-build emcc step (duckdb/extension/extension_build_tools.cmake) that
+# links only the archives in LINKED_LIBS, not target_link_libraries. Without
+# the Rust FFI archive every anofox_ml_* function is an unresolved import and
+# the module can't load (#29). LINKED_LIBS is unused outside WASM.
+set(ANOFOX_ML_LINKED_LIBS "$<TARGET_FILE:anofox_ml_ffi-static>")
+# wasm_eh: current Rust objects declare the bulk-memory-opt and
+# call-indirect-overlong target features, which emsdk 3.1.71's binaryen
+# rejects; their instructions are covered by bulk-memory and reference-types,
+# so the feature list is given explicitly (the extra arguments ride on
+# LINKED_LIBS, which DuckDB splits on spaces). As in anofox-forecast.
+if("${DUCKDB_EXPLICIT_PLATFORM}" STREQUAL "wasm_eh")
+    string(APPEND ANOFOX_ML_LINKED_LIBS " -Xlinker --no-check-features -Xlinker --features=bulk-memory,exception-handling,multivalue,mutable-globals,nontrapping-fptoint,reference-types,sign-ext,simd128")
 endif()
+
+set(ANOFOX_ML_VERSION_ARG "")
+if (NOT ANOFOX_ML_EXT_VERSION STREQUAL "")
+    set(ANOFOX_ML_VERSION_ARG EXTENSION_VERSION ${ANOFOX_ML_EXT_VERSION})
+endif()
+duckdb_extension_load(anofox_ml SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR} LOAD_TESTS ${ANOFOX_ML_VERSION_ARG}
+    LINKED_LIBS "${ANOFOX_ML_LINKED_LIBS}")

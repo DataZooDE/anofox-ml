@@ -83,7 +83,7 @@ LOAD './anofox_ml.duckdb_extension';
 SELECT ml_version();
 ```
 
-The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R. `SHA256SUMS` in the release lists the checksums. There are no DuckDB-Wasm binaries yet ([#29](https://github.com/DataZooDE/anofox-ml/issues/29)). Changes per version are in [CHANGELOG.md](CHANGELOG.md).
+The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R. `SHA256SUMS` in the release lists the checksums. DuckDB-Wasm builds (`wasm_mvp`, `wasm_eh`, `wasm_threads`, DuckDB 1.5.6) ship as `anofox_ml.duckdb_extension.wasm` in the same kind of zip. Changes per version are in [CHANGELOG.md](CHANGELOG.md).
 
 ### From Source
 

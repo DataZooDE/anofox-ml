@@ -263,6 +263,15 @@ SELECT ml_fit_agg('MultinomialNB', label, ml_hashing_vectorize(body, 1024, '{"al
 SELECT ml_predict_label(model, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) FROM new_mails, spam_model;
 ```
 
+For TF-IDF, hash raw counts (`"norm": null`) and fit a `TfidfTransformer` on them. This gives scikit-learn's `HashingVectorizer` + `TfidfTransformer` exactly:
+
+```sql
+CREATE MACRO counts(t) AS ml_hashing_vectorize(t, 4096, '{"alternate_sign": false, "norm": null}');
+CREATE TABLE tfidf AS SELECT ml_fit_agg('TfidfTransformer', counts(body)) AS idf FROM mails;
+CREATE TABLE clf AS SELECT idf, ml_fit_agg('LinearSvc', label, ml_transform(idf, counts(body))) AS model FROM mails, tfidf GROUP BY idf;
+SELECT ml_predict_label(model, ml_transform(idf, counts(body))) FROM new_mails, clf;
+```
+
 ### Hyperparameter Tuning
 
 `ml_tune_agg(kind, y, [x1, x2, …], search_space [, options])` searches hyperparameters by k-fold cross-validation and returns `STRUCT(best_params, best_score, model, trials)`. `model` is the best candidate refitted on all rows, ready for `ml_predict`, and `trials` is a JSON array of every candidate's mean / std score (or its error). Per `GROUP BY` group, one search each.

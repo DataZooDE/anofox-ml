@@ -58,3 +58,27 @@ statement error
 SELECT ml_hashing_vectorize('xx yy', 8, '{"norm": "l1"}');
 ----
 norm must be
+
+# TF-IDF on hashed counts: scikit-learn 1.9 HashingVectorizer(n_features=64,
+# alternate_sign=False, norm=None) + TfidfTransformer() gives
+# [(6, 0.6451024322949592), (58, 0.764096101185661)] for 'win money'
+statement ok
+CREATE TABLE mails AS SELECT * FROM (VALUES ('win money now', 'spam'), ('cheap money win', 'spam'), ('meeting at noon', 'ham'),
+    ('lunch meeting tomorrow', 'ham'), ('win a cheap prize', 'spam'), ('project meeting notes', 'ham')) t(body, label);
+
+query I
+SELECT list_filter(list_zip(range(0, 64), v), lambda p: p[2] <> 0) FROM (
+    SELECT ml_transform(ml_fit_agg('TfidfTransformer', ml_hashing_vectorize(body, 64, '{"alternate_sign": false, "norm": null}')),
+                        ml_hashing_vectorize('win money', 64, '{"alternate_sign": false, "norm": null}')) AS v FROM mails);
+----
+[(6, 0.6451024322949592), (58, 0.764096101185661)]
+
+query II
+WITH tf AS (SELECT ml_fit_agg('TfidfTransformer', ml_hashing_vectorize(body, 64, '{"alternate_sign": false, "norm": null}')) AS idf FROM mails),
+     m AS (SELECT idf, ml_fit_agg('LinearSvc', label, ml_transform(idf, ml_hashing_vectorize(body, 64, '{"alternate_sign": false, "norm": null}'))) AS model
+           FROM mails, tf GROUP BY idf)
+SELECT body, ml_predict_label(model, ml_transform(idf, ml_hashing_vectorize(body, 64, '{"alternate_sign": false, "norm": null}')))
+FROM (VALUES ('cheap money'), ('meeting tomorrow')) n(body), m ORDER BY body;
+----
+cheap money	spam
+meeting tomorrow	ham

@@ -11,14 +11,14 @@ description = "C ABI over anofox-ml-registry for the anofox_ml DuckDB extension"
 crate-type = ["staticlib"]
 
 [dependencies]
-anofox-ml-core = "0.4"
-anofox-ml-registry = { version = "0.4", features = ["perpetual"] }
-anofox-ml-metrics = "0.4"
-anofox-ml-conformal = "0.4"
-anofox-ml-text = "0.4"
-anofox-ml-preprocessing = "0.4"
-anofox-ml-cluster = "0.4"
-anofox-ml-manifold = "0.4"
+anofox-ml-core = "0.5"
+anofox-ml-registry = { version = "0.5", features = ["perpetual"] }
+anofox-ml-metrics = "0.5"
+anofox-ml-conformal = "0.5"
+anofox-ml-text = "0.5"
+anofox-ml-preprocessing = "0.5"
+anofox-ml-cluster = "0.5"
+anofox-ml-manifold = "0.5"
 ndarray = "0.16"
 rand = "0.8"
 rayon = "1.10"

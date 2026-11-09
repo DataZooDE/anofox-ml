@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- anofox-ml 0.5: 188 estimator kinds (from 144), among them voting / stacking / calibration / transformed-target / multi-output meta-estimators, Gaussian processes, PLS / CCA, multi-task lasso, LARS CV, text vectorizers and more. Stored models from 0.2 and 0.4 load and predict identically. `ml_predict_log_proba` is native where the estimator has it (finite where probabilities underflow).
 - Building from source needs Rust 1.88 (was 1.87), for the PerpetualBooster kinds (#47).
 
 ### Added

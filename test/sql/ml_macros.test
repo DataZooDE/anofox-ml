@@ -116,3 +116,34 @@ SELECT chunk, auc > 0.65, drifted FROM ml_domain_classifier_drift_by('obs', week
 ----
 w1	false	false
 w2	true	true
+
+# Direct loss estimation: errors grow with x1; chunks c2 / c3 shift x1 up.
+# The estimates follow the realized MAE / RMSE of the unlabelled chunks.
+statement ok
+CREATE TABLE dle_d AS SELECT *, 2 * x1 + x2 + u * (0.2 + 0.4 * x1) AS y, 2 * x1 + x2 AS pred FROM (
+    SELECT i, CASE WHEN i < 2000 THEN 'ref' ELSE 'c' || ((i - 2000) // 500) END AS chunk,
+           (hash(i) % 1000) / 100.0 + CASE WHEN i >= 3000 THEN 5 ELSE 0 END AS x1, (hash(i, 'b') % 1000) / 100.0 AS x2,
+           ((hash(i, 'n') % 2001) / 1000.0 - 1.0) AS u FROM range(4000) t(i));
+
+statement ok
+CREATE TABLE dle_ref AS FROM dle_d WHERE chunk = 'ref';
+
+statement ok
+CREATE TABLE dle_new AS SELECT * EXCLUDE (y) FROM dle_d WHERE chunk <> 'ref';
+
+query IIIII
+SELECT e.chunk, e.n_rows, abs(e.estimated_mae / r.mae - 1) < 0.1, abs(e.estimated_rmse / r.rmse - 1) < 0.15, e.mae_sampling_error > 0
+FROM ml_dle_estimate_by('dle_ref', 'dle_new', chunk, y, pred, [x1, x2]) e
+JOIN (SELECT chunk, avg(abs(y - pred)) AS mae, sqrt(avg((y - pred) ^ 2)) AS rmse FROM dle_d GROUP BY chunk) r USING (chunk)
+ORDER BY e.chunk;
+----
+c0	500	true	true	true
+c1	500	true	true	true
+c2	500	true	true	true
+c3	500	true	true	true
+
+query I
+SELECT bool_and(estimated_mae > 1.5) FROM ml_dle_estimate_by('dle_ref', 'dle_new', chunk, y, pred, [x1, x2],
+    kind := 'HistGradientBoostingRegressor', params := '{"n_estimators": 50}') WHERE chunk IN ('c2', 'c3');
+----
+true

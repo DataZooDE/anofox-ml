@@ -89,6 +89,25 @@ SELECT _chunk AS chunk, count(*) FILTER (WHERE _y = 0) AS n_reference, count(*) 
 FROM _p GROUP BY _chunk ORDER BY _chunk
 )";
 
+// Direct loss estimation (NannyML's DLE): on labelled reference rows, models
+// learn the absolute and the squared error of a regression model from its
+// features and prediction; averaged over the rows of an unlabelled chunk they
+// estimate its MAE and RMSE. Sampling errors: the spread of the reference
+// errors over sqrt(rows) (RMSE by the delta method).
+const char *kDle = R"(
+WITH _r AS (SELECT y_col AS _y, pred_col AS _p, list_append(x_cols, pred_col::DOUBLE) AS _x FROM query_table(reference::VARCHAR)),
+_m AS (SELECT ml_fit_agg(kind, abs(_y - _p), _x, params) AS _mae, ml_fit_agg(kind, (_y - _p) ^ 2, _x, params) AS _mse,
+              stddev_pop(abs(_y - _p)) AS _sd_ae, stddev_pop((_y - _p) ^ 2) AS _sd_se
+       FROM _r WHERE _y IS NOT NULL AND _p IS NOT NULL),
+_a AS (SELECT chunk_col AS _chunk, list_append(x_cols, pred_col::DOUBLE) AS _x FROM query_table(analysis::VARCHAR)),
+_e AS (SELECT _chunk, count(*) AS _n, avg(greatest(ml_predict(_mae, _x), 0)) AS _ae, avg(greatest(ml_predict(_mse, _x), 0)) AS _se,
+              any_value(_sd_ae) AS _sd_ae, any_value(_sd_se) AS _sd_se
+       FROM _a, _m WHERE _x IS NOT NULL GROUP BY _chunk)
+SELECT _chunk AS chunk, _n AS n_rows, _ae AS estimated_mae, _sd_ae / sqrt(_n) AS mae_sampling_error,
+       sqrt(_se) AS estimated_rmse, _sd_se / sqrt(_n) / (2 * sqrt(_se)) AS rmse_sampling_error
+FROM _e ORDER BY _chunk
+)";
+
 const TableMacro kMacros[] = {
     {"ml_fit_predict_by", {"source", "group_col", "y_col", "x_cols", "kind"}, {{"params", "'{}'"}}, kFitPredict},
     {"ml_fit_predict_proba_by",
@@ -115,6 +134,10 @@ const TableMacro kMacros[] = {
      {"source", "chunk_col", "id_col", "x_cols", "reference"},
      {{"kind", "'HistGradientBoostingClassifier'"}, {"params", "'{}'"}, {"folds", "5"}, {"threshold", "0.55"}, {"seed", "0"}},
      kDomainClassifierDrift},
+    {"ml_dle_estimate_by",
+     {"reference", "analysis", "chunk_col", "y_col", "pred_col", "x_cols"},
+     {{"kind", "'LgbmRegressor'"}, {"params", "'{}'"}},
+     kDle},
 };
 
 unique_ptr<CreateMacroInfo> MakeTableMacro(const TableMacro &def) {

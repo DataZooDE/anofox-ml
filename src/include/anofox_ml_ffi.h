@@ -46,6 +46,9 @@ typedef struct {
     uint32_t format_version;
     char *crate_version;
     AnofoxMlStrings labels; // string class labels (len 0 unless fitted on labels)
+    double n_iter;          // training statistics, NaN where the model has none
+    double inertia;
+    double oob_score;
 } AnofoxMlModelInfo;
 
 // Predict n_rows rows of x; `out` receives one class label per row (the
@@ -156,7 +159,8 @@ char *anofox_ml_tune(const char *kind, const char *space, const char *options, c
 void anofox_ml_free_tune_result(AnofoxMlTuneResult r);
 
 // A fitted array (first of the comma-separated keys found in the fitted
-// state): rows x cols doubles, row-major.
+// state): rows x cols doubles, row-major. The key "feature_importances"
+// calls the model's feature_importances method.
 char *anofox_ml_model_array(const uint8_t *model, size_t model_len, const char *keys, AnofoxMlDoubles *out,
                             size_t *rows, size_t *cols);
 

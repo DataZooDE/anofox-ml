@@ -404,3 +404,56 @@ query I
 SELECT list_contains(ml_model_info(ml_fit_agg('ExtraTreesClassifier', lab, [a, b], '{"n_estimators": 5}')).capabilities, 'predict_proba') FROM k04;
 ----
 true
+
+# Feature importances (DynModel::feature_importances, anofox-ml 0.4).
+query II
+SELECT len(fi), abs(list_sum(fi) - 1) < 1e-9 FROM (SELECT ml_feature_importances(ml_fit_agg('RandomForestRegressor', 3 * a + 0.1 * b, [a, b], '{"n_estimators": 10, "seed": 0}')) AS fi FROM k04);
+----
+2	true
+
+query I
+SELECT fi[1] > fi[2] FROM (SELECT ml_feature_importances(ml_fit_agg('HistGradientBoostingRegressor', 3 * a + 0.1 * b, [a, b])) AS fi FROM k04);
+----
+true
+
+query I
+SELECT len(ml_feature_importances(ml_fit_agg('ExtraTreesClassifier', lab, [a, b], '{"n_estimators": 5}'))) FROM k04;
+----
+2
+
+query I
+SELECT ml_feature_importances(NULL::BLOB) IS NULL;
+----
+true
+
+statement error
+SELECT ml_feature_importances(ml_fit_agg('OlsRegressor', a + b, [a, b])) FROM k04;
+----
+feature_importances
+
+# Training statistics in ml_model_info; NULL where the model has none.
+query III
+SELECT i.n_iter > 0, i.inertia > 0, i.oob_score IS NULL FROM (SELECT ml_model_info(ml_fit_agg('KMeans', [a, b], '{"n_clusters": 3}')) AS i FROM k04);
+----
+true	true	true
+
+query II
+SELECT i.oob_score BETWEEN 0 AND 1, i.n_iter IS NULL FROM (SELECT ml_model_info(ml_fit_agg('RandomForestRegressor', a + b, [a, b], '{"n_estimators": 20, "oob_score": true, "seed": 0}')) AS i FROM k04);
+----
+true	true
+
+query I
+SELECT ml_model_info(ml_fit_agg('LogisticRegressor', lab, [a, b])).n_iter > 0 FROM k04;
+----
+true
+
+# The 0.4 kinds RidgeClassifier and NearestCentroid work with the accessors.
+query I
+SELECT len(ml_coefficients(ml_fit_agg('RidgeClassifier', lab, [a, b])).coef[1]) FROM k04;
+----
+2
+
+query I
+SELECT len(ml_cluster_centers(ml_fit_agg('NearestCentroid', lab, [a, b]))) FROM k04;
+----
+2

@@ -96,6 +96,11 @@ pub struct AnofoxMlModelInfo {
     pub crate_version: *mut c_char,
     /// String class labels (empty unless fitted on string labels).
     pub labels: AnofoxMlStrings,
+    /// Training statistics from the fitted state, NaN where the model has
+    /// none: iterations run, KMeans inertia, out-of-bag score.
+    pub n_iter: f64,
+    pub inertia: f64,
+    pub oob_score: f64,
 }
 
 #[repr(C)]
@@ -341,11 +346,16 @@ fn run_method(
             ))),
         })
     });
-    match out.map_err(|e| e.to_string())? {
-        Out::A1(a) => Ok((a.to_vec(), 1)),
+    Ok(flatten(out.map_err(|e| e.to_string())?))
+}
+
+/// Row-major values of a registry output and its column count.
+fn flatten(out: Out) -> (Vec<f64>, usize) {
+    match out {
+        Out::A1(a) => (a.to_vec(), 1),
         Out::A2(a) => {
             let cols = a.ncols();
-            Ok((a.as_standard_layout().iter().copied().collect(), cols))
+            (a.as_standard_layout().iter().copied().collect(), cols)
         }
     }
 }
@@ -869,7 +879,8 @@ fn fitted_array(json: &serde_json::Value, keys: &[&str]) -> Option<(usize, usize
 
 /// A fitted array of a model BLOB under the first of the comma-separated
 /// `keys` it has (see [`fitted_array`]); `out` receives `rows * cols`
-/// doubles, row-major.
+/// doubles, row-major. The key `feature_importances` calls the model's
+/// `feature_importances` method instead.
 ///
 /// # Safety
 /// `model` holds `model_len` bytes, `keys` is NUL-terminated; the outputs
@@ -890,6 +901,10 @@ pub unsafe extern "C" fn anofox_ml_model_array(
         let keys: Vec<&str> = str_arg(keys, "keys")?.split(',').collect();
         let blob = std::slice::from_raw_parts(model, model_len);
         with_model(blob, |meta, model| {
+            if keys == ["feature_importances"] {
+                let (v, cols) = flatten(model.feature_importances().map_err(|e| e.to_string())?);
+                return Ok((v.len() / cols.max(1), cols, v));
+            }
             let json: serde_json::Value =
                 serde_json::from_str(&model.fitted_json().map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?;
@@ -944,12 +959,26 @@ pub unsafe extern "C" fn anofox_ml_model_info(
                 format_version: 0,
                 crate_version: cstring(env!("CARGO_PKG_VERSION")),
                 labels: into_strings::<String>(&[]),
+                n_iter: f64::NAN,
+                inertia: f64::NAN,
+                oob_score: f64::NAN,
             });
         }
         let header =
             anofox_ml_core::persistence::binary_header(bytes).map_err(|e| e.to_string())?;
         with_model(blob, |meta, model| {
             let params = model.params().map_err(|e| e.to_string())?;
+            let fitted = model
+                .fitted_json()
+                .ok()
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok());
+            let stat = |keys: &[&str]| {
+                fitted
+                    .as_ref()
+                    .and_then(|j| fitted_array(j, keys))
+                    .filter(|(r, c, _)| r * c == 1)
+                    .map_or(f64::NAN, |(_, _, v)| v[0])
+            };
             Ok(AnofoxMlModelInfo {
                 kind: cstring(meta.kind.as_str()),
                 n_features: meta.n_features,
@@ -965,6 +994,9 @@ pub unsafe extern "C" fn anofox_ml_model_info(
                 format_version: header.as_ref().map_or(0, |h| h.format_version),
                 crate_version: cstring(header.map(|h| h.crate_version).unwrap_or_default()),
                 labels: into_strings(meta.labels.as_deref().unwrap_or_default()),
+                n_iter: stat(&["n_iter", "n_iter_"]),
+                inertia: stat(&["inertia"]),
+                oob_score: stat(&["oob_score_value", "oob_score_"]),
             })
         })
     };

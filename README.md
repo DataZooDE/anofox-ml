@@ -211,7 +211,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
 | `ml_outlier_score_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
 | `ml_fit_transform_agg(kind, [y,] [x1, x2, …] [, params [, weight]])` | Aggregate: fit on the group and return each row's output (`DOUBLE[][]`): the training embedding of t-SNE, Isomap, LLE and MDS, TargetEncoder's cross-fitted encoding, or `transform` of the training rows |
-| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version`, `crate_version` and `labels` (string class labels) |
+| `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version`, `crate_version`, `labels` (string class labels), and the training statistics `n_iter`, `inertia` (KMeans) and `oob_score` (forests with `oob_score: true`), NULL where the model has none |
 | `ml_permutation_importance_agg(model, y, [x1, x2, …] [, options])` | Aggregate over evaluation rows: `STRUCT(feature, importance_mean, importance_std)[]`, the drop in a metric when feature `feature` (1-based, as in `x[feature]`) is shuffled. Options: `metric` (any metric aggregate name; default `accuracy` for classifiers, `r2` otherwise; losses are negated so higher = more important), `metric_options`, `n_repeats` (5), `seed` |
 | `ml_mutual_info_agg(y, [x1, x2, …] [, options])` | Aggregate: mutual information (nats) between each feature and `y`, as scikit-learn's `mutual_info_regression` / `mutual_info_classif` (`DOUBLE[]`). `y` may be `VARCHAR`. Options: `discrete_target`, `discrete_features` (`"auto"`, `true` or 1-based positions), `n_neighbors` (3), `seed` |
 | `ml_covariance_agg([x1, x2, …] [, options])` | Aggregate: `STRUCT(covariance DOUBLE[][], shrinkage)`; `method` = `"ledoit_wolf"` (default), `"oas"` or `"empirical"`, as scikit-learn |
@@ -222,6 +222,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_coefficients(model)` | `STRUCT(coef DOUBLE[][], intercept DOUBLE[])` of a linear model (one `coef` row per class for multiclass models) |
 | `ml_cluster_centers(model)` | `DOUBLE[][]`: centroids / cluster centres / mixture means |
 | `ml_explained_variance_ratio(model)` | `DOUBLE[]` of PCA-like decompositions |
+| `ml_feature_importances(model)` | `DOUBLE[]`, one impurity-based importance per feature, summing to 1: decision trees, random forests, extra trees, gradient boosting, histogram gradient boosting, LGBM and bagging. For any model, see `ml_permutation_importance_agg` |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 

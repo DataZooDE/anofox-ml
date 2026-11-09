@@ -58,7 +58,7 @@ struct Meta {
 type CachedModel = Option<(u64, usize, Meta, Box<dyn DynModel>)>;
 
 /// Prediction methods callable through [`anofox_ml_apply`].
-const METHODS: [&str; 7] = [
+const METHODS: [&str; 8] = [
     "predict",
     "predict_proba",
     "predict_log_proba",
@@ -66,6 +66,7 @@ const METHODS: [&str; 7] = [
     "transform",
     "inverse_transform",
     "score_samples",
+    "staged_predict",
 ];
 
 #[repr(C)]
@@ -384,6 +385,7 @@ fn run_method(
             "transform" => model.transform(x),
             "inverse_transform" => model.inverse_transform(x),
             "score_samples" => model.score_samples(x),
+            "staged_predict" => model.staged_predict(x),
             "labels" => model.labels(),
             "embedding" => model.embedding(),
             _ => Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
@@ -415,6 +417,18 @@ fn fit_impl(
     threads: usize,
 ) -> Result<Vec<u8>, String> {
     let model = fit_model(kind, params, x, y, w, threads)?;
+    encode_fitted(kind, model.as_ref(), x.ncols(), y, labels)
+}
+
+/// The BLOB of a fitted model: metadata (classes from the targets `y` of a
+/// model with `predict_proba`, string labels) and the registry bytes.
+fn encode_fitted(
+    kind: &str,
+    model: &dyn DynModel,
+    n_features: usize,
+    y: Option<ArrayView1<f64>>,
+    labels: Option<Vec<String>>,
+) -> Result<Vec<u8>, String> {
     let bytes = model.to_bytes().map_err(|e| e.to_string())?;
     let classes = match y {
         Some(y) if model.capabilities().contains(&"predict_proba") => {
@@ -430,13 +444,136 @@ fn fit_impl(
     };
     let meta = Meta {
         kind: kind.to_string(),
-        n_features: x.ncols(),
+        n_features,
         classes,
         labels,
         conformity: None,
         encoder: None,
     };
     Ok(encode(&meta, &bytes))
+}
+
+/// Fit on the rows where `validation` is false, with the others as the
+/// validation set of the model's early stopping (`fit_with_validation`).
+#[allow(clippy::too_many_arguments)]
+fn fit_validated_impl(
+    kind: &str,
+    params: &str,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    w: Option<ArrayView1<f64>>,
+    validation: &[bool],
+    labels: Option<Vec<String>>,
+    threads: usize,
+) -> Result<Vec<u8>, String> {
+    let params_json: serde_json::Value = if params.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(params).map_err(|e| format!("invalid params JSON: {e}"))?
+    };
+    let mut model = anofox_ml_registry::make(kind, &params_json).map_err(|e| e.to_string())?;
+    if !model.capabilities().contains(&"fit_with_validation") {
+        return Err(format!(
+            "{kind} does not support fit_with_validation (an explicit validation set); use ml_fit_agg"
+        ));
+    }
+    let rows =
+        |val: bool| -> Vec<usize> { (0..x.nrows()).filter(|&i| validation[i] == val).collect() };
+    let (train, val) = (rows(false), rows(true));
+    if train.is_empty() || val.is_empty() {
+        return Err("fit_with_validation needs both training and validation rows".into());
+    }
+    let take = |idx: &[usize]| {
+        (
+            x.select(ndarray::Axis(0), idx),
+            y.select(ndarray::Axis(0), idx),
+            w.map(|w| w.select(ndarray::Axis(0), idx)),
+        )
+    };
+    let ((xt, yt, wt), (xv, yv, wv)) = (take(&train), take(&val));
+    run_fit(threads, || {
+        model.fit_with_validation(
+            xt.view(),
+            Some(yt.view()),
+            wt.as_ref().map(|w| w.view()),
+            xv.view(),
+            Some(yv.view()),
+            wv.as_ref().map(|w| w.view()),
+        )
+    })?
+    .map_err(|e| e.to_string())?;
+    encode_fitted(kind, model.as_ref(), x.ncols(), Some(y), labels)
+}
+
+/// Fit `kind` with an explicit validation set: rows with `validation[i] != 0`
+/// are the validation set of the model's early stopping, the others the
+/// training set. The target is `y` (`n_rows` doubles), or the string
+/// labels `y_labels` when `y` is NULL. `w` may be NULL.
+///
+/// # Safety
+/// As [`anofox_ml_fit`]; `validation` holds `n_rows` bytes, `y_labels`
+/// (when used) `n_rows` NUL-terminated strings.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn anofox_ml_fit_validation(
+    kind: *const c_char,
+    params: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    y: *const f64,
+    y_labels: *const *const c_char,
+    w: *const f64,
+    validation: *const u8,
+    threads: usize,
+    out: *mut AnofoxMlBytes,
+) -> *mut c_char {
+    let run = || -> Result<Vec<u8>, String> {
+        let kind = str_arg(kind, "kind")?;
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let x = matrix(x, n_rows, n_cols)?;
+        if validation.is_null() {
+            return Err("validation flags are NULL".into());
+        }
+        let validation: Vec<bool> = std::slice::from_raw_parts(validation, n_rows)
+            .iter()
+            .map(|&v| v != 0)
+            .collect();
+        let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
+        if y.is_null() {
+            let (labels, codes) = encode_labels(&strings(y_labels, n_rows, "y")?);
+            fit_validated_impl(
+                kind,
+                params,
+                x,
+                ArrayView1::from(&codes),
+                w,
+                &validation,
+                Some(labels),
+                threads,
+            )
+        } else {
+            let y = ArrayView1::from(std::slice::from_raw_parts(y, n_rows));
+            fit_validated_impl(kind, params, x, y, w, &validation, None, threads)
+        }
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            *out = AnofoxMlBytes {
+                data: b.as_mut_ptr(),
+                len: b.len(),
+            };
+            std::mem::forget(b);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while fitting"),
+    }
 }
 
 /// Fit, then run the first of the comma-separated `methods` the model

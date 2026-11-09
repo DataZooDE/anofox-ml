@@ -200,6 +200,7 @@ SELECT kind, default_params FROM ml_estimators();
 |---|---|
 | `ml_estimators()` | Table of every estimator `kind` with its default parameters (JSON) |
 | `ml_fit_agg(kind, y, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a model per group, returns a model `BLOB`. `y` is `DOUBLE`, or `VARCHAR` class labels for classifiers. `params` is a JSON object merged into the defaults; `weight` is a per-row sample weight |
+| `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |
 | `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …) |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
 | `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
@@ -208,6 +209,7 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_decision_function(model, [x1, x2, …])` | Decision function values (`DOUBLE[]`) |
 | `ml_transform(model, [x1, x2, …])` / `ml_inverse_transform(…)` | Transformed features (`DOUBLE[]`); `ml_transform(encoder, [VARCHAR, …])` for the categorical encoders |
 | `ml_score_samples(model, [x1, x2, …])` | Per-sample scores, e.g. outlier scores or log-likelihoods (`DOUBLE[]`) |
+| `ml_staged_predict(model, [x1, x2, …])` | Boosting kinds (gradient boosting, HGB, LGBM): the prediction after each stage (`DOUBLE[]`; the class or label index per stage for classifiers). The last entry equals `ml_predict` |
 | `ml_cluster_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit a clustering (or outlier) estimator on the group and return one label per row (`BIGINT[]`; `-1` is noise for DBSCAN-like methods) |
 | `ml_outlier_score_agg(kind, [x1, x2, …] [, params [, weight]])` | Aggregate: fit an outlier detector on the group and return one score per row (`DOUBLE[]`; lower is more anomalous, as in scikit-learn) |
 | `ml_fit_transform_agg(kind, [y,] [x1, x2, …] [, params [, weight]])` | Aggregate: fit on the group and return each row's output (`DOUBLE[][]`): the training embedding of t-SNE, Isomap, LLE and MDS, TargetEncoder's cross-fitted encoding, or `transform` of the training rows |
@@ -429,6 +431,20 @@ SELECT ml_fit_agg('CatBoostRegressor', units, [price, store_code], '{"cat_featur
 
 ```sql
 SELECT ml_score_samples(ml_fit_agg('KernelDensity', [a, b], '{"bandwidth": {"Fixed": 1.0}}'), [5.0, 5.0]);
+```
+
+**Learning curves and early stopping.** `ml_staged_predict` scores every boosting stage at once. `ml_fit_with_validation_agg` stops on a validation set you choose, for example the last weeks of a series instead of a random split:
+
+```sql
+-- validation RMSE per stage
+SELECT stage, ml_rmse(y, p[stage]) AS rmse
+FROM (SELECT y, ml_staged_predict(m, [x1, x2]) AS p FROM test, model), range(1, 201) r(stage)
+GROUP BY stage ORDER BY stage;
+
+-- per store: train on the history, stop on the last 28 days
+SELECT store, ml_fit_with_validation_agg('HistGradientBoostingRegressor', units, [price, dow],
+       day > max_day - 28, '{"n_estimators": 1000, "early_stopping": "Enabled"}') AS model
+FROM (SELECT *, max(day) OVER (PARTITION BY store) AS max_day FROM sales) GROUP BY store;
 ```
 
 **Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:

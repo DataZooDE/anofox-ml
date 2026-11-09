@@ -1,9 +1,10 @@
 // Statistic aggregates over feature lists:
 //   ml_mutual_info_agg(y DOUBLE | VARCHAR, x DOUBLE[] [, options]) -> DOUBLE[]
-//   ml_covariance_agg(x DOUBLE[] [, options]) -> STRUCT(covariance DOUBLE[][], shrinkage DOUBLE)
+//   ml_covariance_agg(x DOUBLE[] [, options]) -> STRUCT(covariance DOUBLE[][], shrinkage DOUBLE, location DOUBLE[])
 //   ml_estimate_bandwidth_agg(x DOUBLE[] [, options]) -> DOUBLE
 // Rows with a NULL argument or a NULL feature are skipped; an empty group gives NULL.
 
+#include <cmath>
 #include <map>
 #include <string>
 #include <vector>
@@ -190,7 +191,19 @@ void CovarianceFinalize(Vector &state_vector, AggregateInputData &, Vector &resu
         ListVector::SetListSize(rows, inner + d * d);
         ListVector::SetListSize(cov, outer + d);
         FlatVector::GetData<list_entry_t>(cov)[row] = list_entry_t(outer, d);
-        FlatVector::GetData<double>(*fields[1])[row] = out.data[d * d];
+        const double shrinkage = out.data[d * d];
+        if (std::isnan(shrinkage)) {
+            FlatVector::SetNull(*fields[1], row, true);
+        } else {
+            FlatVector::GetData<double>(*fields[1])[row] = shrinkage;
+        }
+        auto &loc = *fields[2];
+        idx_t loc_size = ListVector::GetListSize(loc);
+        ListVector::Reserve(loc, loc_size + d);
+        memcpy(FlatVector::GetData<double>(ListVector::GetEntry(loc)) + loc_size, out.data + d * d + 1,
+               d * sizeof(double));
+        ListVector::SetListSize(loc, loc_size + d);
+        FlatVector::GetData<list_entry_t>(loc)[row] = list_entry_t(loc_size, d);
         anofox_ml_free_doubles(out);
     }
 }
@@ -370,6 +383,7 @@ void RegisterMlStats(ExtensionLoader &loader) {
     child_list_t<LogicalType> cov_fields;
     cov_fields.emplace_back("covariance", LogicalType::LIST(L));
     cov_fields.emplace_back("shrinkage", D);
+    cov_fields.emplace_back("location", L);
     const auto cov_type = LogicalType::STRUCT(std::move(cov_fields));
     AggregateFunctionSet cov("ml_covariance_agg"), bw("ml_estimate_bandwidth_agg");
     for (auto args : {vector<LogicalType> {L}, vector<LogicalType> {L, V}}) {

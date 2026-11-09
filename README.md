@@ -217,7 +217,9 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_model_info(model)` | `STRUCT` of kind, `n_features`, `classes`, `capabilities` (supported methods), `params` (JSON), `format_version`, `crate_version`, `labels` (string class labels), and the training statistics `n_iter`, `inertia` (KMeans) and `oob_score` (forests with `oob_score: true`), NULL where the model has none |
 | `ml_permutation_importance_agg(model, y, [x1, x2, …] [, options])` | Aggregate over evaluation rows: `STRUCT(feature, importance_mean, importance_std)[]`, the drop in a metric when feature `feature` (1-based, as in `x[feature]`) is shuffled. Options: `metric` (any metric aggregate name; default `accuracy` for classifiers, `r2` otherwise; losses are negated so higher = more important), `metric_options`, `n_repeats` (5), `seed` |
 | `ml_mutual_info_agg(y, [x1, x2, …] [, options])` | Aggregate: mutual information (nats) between each feature and `y`, as scikit-learn's `mutual_info_regression` / `mutual_info_classif` (`DOUBLE[]`). `y` may be `VARCHAR`. Options: `discrete_target`, `discrete_features` (`"auto"`, `true` or 1-based positions), `n_neighbors` (3), `seed` |
-| `ml_covariance_agg([x1, x2, …] [, options])` | Aggregate: `STRUCT(covariance DOUBLE[][], shrinkage)`; `method` = `"ledoit_wolf"` (default), `"oas"` or `"empirical"`, as scikit-learn |
+| `ml_covariance_agg([x1, x2, …] [, options])` | Aggregate: `STRUCT(covariance DOUBLE[][], shrinkage, location DOUBLE[])`, as scikit-learn. `method` = `"ledoit_wolf"` (default), `"oas"`, `"empirical"`, `"shrunk"` (with `shrinkage`, default 0.1) or `"mcd"` (robust minimum covariance determinant; `support_fraction`, `seed`; `shrinkage` is NULL) |
+| `ml_covariance(model)` | `STRUCT(location, covariance, precision)` of a fitted covariance estimator (`EmpiricalCovariance`, `ShrunkCovariance`, `LedoitWolf`, `Oas`, `MinCovDet`, `EllipticEnvelope`) |
+| `ml_mahalanobis(model, [x1, x2, …])` | Squared Mahalanobis distance of a row to a fitted covariance estimator |
 | `ml_estimate_bandwidth_agg([x1, x2, …] [, options])` | Aggregate: a MeanShift bandwidth (scikit-learn `estimate_bandwidth`); options `quantile` (0.3), `n_samples`, `seed` |
 | `ml_multiple_impute_agg(id, [x1, x2, …] [, options] ORDER BY id)` | Aggregate: multiple imputation as Hmisc's `aregImpute` (additive regression + predictive mean matching). A NULL element is a missing value; returns `STRUCT(imputation, id, x DOUBLE[])[]`, `n_impute` completed copies of the rows. Options: `n_impute` (5), `nk` (3), `tlinear`, `burnin`, `match` (`"weighted"` / `"closest"`), `fweighted`, `kinds` (per column `"numeric"` / `"linear"` / `"categorical"`), `seed` (1, as R's `set.seed(1)`) |
 | `ml_spectral_embedding_agg(src, dst [, weight [, options]])` | Aggregate over the edges of an undirected graph: `STRUCT(node, embedding DOUBLE[])[]`, scikit-learn's `spectral_embedding` (options `n_components` (2), `drop_first` (true)) |
@@ -426,6 +428,14 @@ The defaults (`SELECT default_params FROM ml_estimators() WHERE kind = '…'`) s
 
 ```sql
 SELECT ml_fit_agg('CatBoostRegressor', units, [price, store_code], '{"cat_features": [1]}' ORDER BY day) FROM sales;
+```
+
+**Robust outlier screening per group.** `MinCovDet` estimates location and covariance from the bulk of the data, so a few extreme rows don't inflate it; flag rows by their squared Mahalanobis distance (about χ²(p) for Gaussian data):
+
+```sql
+WITH m AS (SELECT sensor, ml_fit_agg('MinCovDet', [temp, pressure]) AS model FROM readings GROUP BY sensor)
+SELECT r.*, ml_mahalanobis(model, [temp, pressure]) > 13.8 AS outlier  -- χ²(2) at 0.999
+FROM readings r JOIN m USING (sensor);
 ```
 
 **Densities and robust outliers.** `KernelDensity` and `FactorAnalysis` give per-row log-likelihoods through `ml_score_samples`. `EllipticEnvelope` (robust covariance) scores rows with `ml_outlier_score_agg` like the other detectors (lower = more anomalous):

@@ -290,7 +290,6 @@ dependencies = [
  "anofox-ml-cluster",
  "anofox-ml-conformal",
  "anofox-ml-core",
- "anofox-ml-discriminant",
  "anofox-ml-manifold",
  "anofox-ml-metrics",
  "anofox-ml-preprocessing",

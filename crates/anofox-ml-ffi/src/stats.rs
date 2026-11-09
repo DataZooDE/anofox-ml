@@ -1,6 +1,6 @@
 //! Table-level statistics behind the `ml_*_agg` helper aggregates:
 //! mutual information (scikit-learn `mutual_info_regression` /
-//! `mutual_info_classif`), shrunk covariance (Ledoit-Wolf, OAS) and the
+//! `mutual_info_classif`), covariance (empirical, shrunk, Ledoit-Wolf, OAS, MinCovDet) and the
 //! MeanShift bandwidth estimate.
 
 use std::ffi::c_char;
@@ -8,7 +8,7 @@ use std::ffi::c_char;
 use anofox_ml_preprocessing::mutual_information::{
     mutual_info_classif, mutual_info_regression, DiscreteFeatures,
 };
-use ndarray::{Array1, ArrayView2, Axis};
+use ndarray::{Array1, ArrayView2};
 use serde::Deserialize;
 
 use crate::{encode_labels, err, into_doubles, matrix, str_arg, strings, AnofoxMlDoubles};
@@ -28,8 +28,15 @@ struct MiOptions {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct CovOptions {
-    /// `"ledoit_wolf"` (default), `"oas"` or `"empirical"`.
+    /// `"ledoit_wolf"` (default), `"oas"`, `"empirical"`, `"shrunk"` or
+    /// `"mcd"` (robust minimum covariance determinant).
     method: Option<String>,
+    /// `shrunk`: the fixed shrinkage towards `μ I` (default 0.1).
+    shrinkage: Option<f64>,
+    /// `mcd`: fraction of rows in the raw support (default `(n + p + 1) / 2n`).
+    support_fraction: Option<f64>,
+    /// `mcd`: random seed of FastMCD (default 0).
+    seed: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -87,27 +94,54 @@ fn mutual_info(
     r.map(|v| v.to_vec()).map_err(|e| e.to_string())
 }
 
-/// `d × d` covariance (row-major) followed by the shrinkage coefficient.
+/// `d × d` covariance (row-major), the shrinkage coefficient (NaN for
+/// `mcd`; 0 for `empirical`) and the `d` location values, as scikit-learn's
+/// estimators of the same names.
 fn covariance(x: ArrayView2<f64>, options: &str) -> Result<Vec<f64>, String> {
+    use anofox_ml_core::FitUnsupervised;
+    use anofox_ml_preprocessing::covariance as cv;
     let o: CovOptions = parse(options)?;
-    let x = x.to_owned();
-    let (cov, shrinkage) = match o.method.as_deref().unwrap_or("ledoit_wolf") {
-        "ledoit_wolf" => anofox_ml_discriminant::ledoit_wolf(&x),
-        "oas" => anofox_ml_discriminant::oas(&x),
-        "empirical" => {
-            // Maximum-likelihood estimate (divides by n), as scikit-learn.
-            let mean = x.mean_axis(Axis(0)).ok_or("no rows")?;
-            let xc = &x - &mean;
-            (xc.t().dot(&xc) / x.nrows() as f64, 0.0)
+    let method = o.method.as_deref().unwrap_or("ledoit_wolf");
+    if method != "shrunk" && o.shrinkage.is_some() {
+        return Err("shrinkage applies to method \"shrunk\"".into());
+    }
+    if method != "mcd" && (o.support_fraction.is_some() || o.seed.is_some()) {
+        return Err("support_fraction and seed apply to method \"mcd\"".into());
+    }
+    let fitted = match method {
+        "ledoit_wolf" => cv::LedoitWolf::default().fit_view(x),
+        "oas" => cv::Oas::default().fit_view(x),
+        "empirical" => cv::EmpiricalCovariance::default().fit_view(x),
+        "shrunk" => cv::ShrunkCovariance {
+            shrinkage: o.shrinkage.unwrap_or(0.1),
+            ..Default::default()
         }
+        .fit_view(x),
+        "mcd" => cv::MinCovDet {
+            support_fraction: o.support_fraction,
+            seed: o.seed.unwrap_or(0),
+            ..Default::default()
+        }
+        .fit_view(x),
         m => {
             return Err(format!(
-                "method must be \"ledoit_wolf\", \"oas\" or \"empirical\", got \"{m}\""
+                "method must be \"ledoit_wolf\", \"oas\", \"empirical\", \"shrunk\" or \"mcd\", got \"{m}\""
             ))
         }
+    }
+    .map_err(|e| e.to_string())?;
+    let shrinkage = match method {
+        "empirical" => 0.0,
+        _ => fitted.shrinkage().unwrap_or(f64::NAN),
     };
-    let mut out: Vec<f64> = cov.as_standard_layout().iter().copied().collect();
+    let mut out: Vec<f64> = fitted
+        .covariance()
+        .as_standard_layout()
+        .iter()
+        .copied()
+        .collect();
     out.push(shrinkage);
+    out.extend(fitted.location().iter().copied());
     Ok(out)
 }
 
@@ -269,7 +303,7 @@ mod tests {
         let mi = mutual_info(x.view(), y, false, "").unwrap();
         assert!(mi[0] > 1.0 && mi[1] < 0.1, "{mi:?}");
         let c = covariance(x.view(), r#"{"method": "empirical"}"#).unwrap();
-        assert_eq!(c.len(), 5);
+        assert_eq!(c.len(), 7); // 2 × 2 covariance, shrinkage, 2 location values
         assert!(c[1].abs() < c[0], "{c:?}");
         let lw = covariance(x.view(), "").unwrap();
         assert!(lw[4] >= 0.0 && lw[4] <= 1.0);

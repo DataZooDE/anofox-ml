@@ -94,3 +94,53 @@ ORDER BY g;
 ----
 1	true
 2	true
+
+# scikit-learn 1.9: ShrunkCovariance(shrinkage=0.1) and MinCovDet(random_state=0)
+# on the same X; location_ alongside
+query IIII
+SELECT c.covariance[1][1], c.covariance[1][3], c.location[2], c.shrinkage
+FROM (SELECT ml_covariance_agg([(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE, (i % 7) * 2.0 + (i % 3)], '{"method": "shrunk"}') AS c FROM range(50) t(i));
+----
+4.733986666666666	7.390440000000003	5.0	0.1
+
+query IIIII
+SELECT round(c.covariance[1][1], 12), round(c.covariance[1][3], 12), round(c.location[1], 12), round(c.location[3], 12), c.shrinkage IS NULL
+FROM (SELECT ml_covariance_agg([(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE, (i % 7) * 2.0 + (i % 3)], '{"method": "mcd"}') AS c FROM range(50) t(i));
+----
+3.631002743805	7.874014172076	3.470588235294	7.735294117647	true
+
+query I
+SELECT c.location FROM (SELECT ml_covariance_agg([i::DOUBLE], '{"method": "empirical"}') AS c FROM range(10) t(i));
+----
+[4.5]
+
+statement error
+SELECT ml_covariance_agg([i::DOUBLE], '{"method": "oas", "shrinkage": 0.5}') FROM range(10) t(i);
+----
+shrinkage applies to method "shrunk"
+
+# Fitted covariance models: ml_covariance gives what ml_covariance_agg gives;
+# ml_mahalanobis is the squared distance (location itself: 0)
+query III
+SELECT round(f.covariance[1][3] - a.covariance[1][3], 12), round(f.location[2] - a.location[2], 12),
+       round(list_sum(list_transform(range(1, 4), lambda r: list_sum(list_transform(range(1, 4), lambda c: f.covariance[r][c] * f.precision[c][r])))), 9)
+FROM (SELECT ml_covariance(ml_fit_agg('MinCovDet', x)) AS f, ml_covariance_agg(x, '{"method": "mcd"}') AS a
+      FROM (SELECT [(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE, (i % 7) * 2.0 + (i % 3)] AS x FROM range(50) t(i)));
+----
+0.0	0.0	3.0
+
+query II
+SELECT round(ml_mahalanobis(m, ml_covariance(m).location), 12), ml_mahalanobis(m, [100.0, 0.0, 0.0]) > 100
+FROM (SELECT ml_fit_agg('LedoitWolf', [(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE, (i % 7) * 2.0 + (i % 3)]) AS m FROM range(50) t(i));
+----
+0.0	true
+
+query I
+SELECT len(ml_covariance(ml_fit_agg('EllipticEnvelope', [(i % 7)::DOUBLE, ((i * 13) % 11)::DOUBLE])).covariance) FROM range(50) t(i);
+----
+2
+
+statement error
+SELECT ml_covariance(ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE])) FROM range(10) t(i);
+----
+has no location

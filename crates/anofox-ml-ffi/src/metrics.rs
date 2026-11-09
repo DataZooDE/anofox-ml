@@ -101,6 +101,7 @@ pub(crate) const METRICS: &[&str] = &[
     "coverage",
     "interval_score",
     "conformal_margin",
+    "mean_pinball_loss",
 ];
 
 pub(crate) fn metric(
@@ -230,6 +231,12 @@ pub(crate) fn metric(
                 let alpha = o.alpha.ok_or("interval_score needs alpha")?;
                 m::interval_score(&y_true, &lo, &hi, alpha)
             }
+        }
+        "mean_pinball_loss" => {
+            need_cols(1)?;
+            no_weight(&w)?;
+            let alpha = o.alpha.ok_or("mean_pinball_loss needs alpha")?;
+            m::intervals::mean_pinball_loss(&y_true, &col(0), alpha)
         }
         "conformal_margin" => {
             need_cols(1)?;

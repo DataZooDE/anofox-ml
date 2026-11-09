@@ -7,6 +7,7 @@
 // expression from being read as a column position.
 
 #include "duckdb.hpp"
+#include "duckdb/catalog/default/default_functions.hpp"
 #include "duckdb/function/table_macro_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -117,7 +118,23 @@ unique_ptr<CreateMacroInfo> MakeTableMacro(const TableMacro &def) {
 
 } // anonymous namespace
 
+// Aggregate metrics of conformal prediction sets (ml_predict_set's VARCHAR[]).
+// A numeric y matches its label text as a number ("1" for 1.0).
+const DefaultMacro kScalarMacros[] = {
+    {DEFAULT_SCHEMA,
+     "ml_set_coverage",
+     {"y", "prediction_set", nullptr},
+     {{nullptr, nullptr}},
+     "avg(CASE WHEN y IS NULL OR prediction_set IS NULL THEN NULL "
+     "WHEN list_contains(prediction_set, y::VARCHAR) OR coalesce(list_contains(list_transform(prediction_set, "
+     "_e -> TRY_CAST(_e AS DOUBLE)), TRY_CAST(y AS DOUBLE)), false) THEN 1.0 ELSE 0.0 END)"},
+    {DEFAULT_SCHEMA, "ml_mean_set_size", {"prediction_set", nullptr}, {{nullptr, nullptr}}, "avg(len(prediction_set))"},
+};
+
 void RegisterMlMacros(ExtensionLoader &loader) {
+    for (const auto &def : kScalarMacros) {
+        loader.RegisterFunction(*DefaultFunctionGenerator::CreateInternalMacroInfo(def));
+    }
     for (const auto &def : kMacros) {
         loader.RegisterFunction(*MakeTableMacro(def));
     }

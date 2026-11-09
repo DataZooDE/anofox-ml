@@ -352,6 +352,8 @@ void RegisterMlMetrics(ExtensionLoader &loader) {
         {{"ml_interval_score", "interval_score"}, Shape::INTERVAL, false, false, false, false, false},
         // conformal: quantile of |y - y_pred|
         {{"ml_conformal_margin", "conformal_margin"}, Shape::ALPHA, false, false, false, false, false},
+        // quantile forecasts: (y, q, alpha)
+        {{"ml_mean_pinball_loss", "mean_pinball_loss"}, Shape::ALPHA, false, false, false, false, false},
     };
 
     for (const auto &spec : specs) {

@@ -1,0 +1,116 @@
+# name: test/sql/ml_meta.test
+# description: voting, stacking, calibration and transformed-target meta-estimators
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# Continuous features (no distance ties for the kNN members), a noisy class y and target r.
+statement ok
+CREATE TABLE d AS SELECT i, a, b,
+    CASE WHEN a - 0.5 * b + ((hash(i) % 100) / 25.0 - 2) > 1 THEN 1.0 ELSE 0.0 END AS y,
+    2 * a - b + ((hash(i, 'r') % 100) / 50.0 - 1) AS r
+FROM (SELECT i, (hash(i, 'a') % 100000) / 10000.0 AS a, (hash(i, 'b') % 100000) / 10000.0 AS b FROM range(200) t(i));
+
+statement ok
+CREATE TABLE m AS SELECT
+    ml_fit_agg('GaussianNB', y, [a, b]) AS nb,
+    ml_fit_agg('LogisticRegressor', y, [a, b]) AS lr,
+    ml_fit_agg('KnnClassifier', y, [a, b]) AS kc,
+    ml_fit_agg('VotingClassifier', y, [a, b], '{"estimators": [{"estimator": "GaussianNB", "estimator_params": {}},
+        {"estimator": "LogisticRegressor", "estimator_params": {}}], "voting": "soft", "weights": [1, 3]}') AS soft,
+    ml_fit_agg('VotingClassifier', y, [a, b], '{"estimators": [{"estimator": "GaussianNB", "estimator_params": {}},
+        {"estimator": "LogisticRegressor", "estimator_params": {}}, {"estimator": "KnnClassifier", "estimator_params": {}}]}') AS hard,
+    ml_fit_agg('OlsRegressor', r, [a, b]) AS ols,
+    ml_fit_agg('KnnRegressor', r, [a, b]) AS kr,
+    ml_fit_agg('VotingRegressor', r, [a, b], '{"estimators": [{"estimator": "OlsRegressor", "estimator_params": {}},
+        {"estimator": "KnnRegressor", "estimator_params": {}}], "weights": [2, 1]}') AS vr
+FROM d;
+
+# soft voting: the weighted mean of the members' probabilities
+query I
+SELECT max(abs(ml_predict_proba(soft, [a, b])[2] - (ml_predict_proba(nb, [a, b])[2] + 3 * ml_predict_proba(lr, [a, b])[2]) / 4)) < 1e-12
+FROM d, m;
+----
+true
+
+# hard voting: the majority of the members' classes
+query I
+SELECT bool_and(ml_predict(hard, [a, b]) = (ml_predict(nb, [a, b]) + ml_predict(lr, [a, b]) + ml_predict(kc, [a, b]) >= 2)::DOUBLE)
+FROM d, m;
+----
+true
+
+# voting regressor: the weighted mean of the members' predictions
+query I
+SELECT max(abs(ml_predict(vr, [a, b]) - (2 * ml_predict(ols, [a, b]) + ml_predict(kr, [a, b])) / 3)) < 1e-12 FROM d, m;
+----
+true
+
+# Stacking on 5-fold out-of-fold predictions, as scikit-learn:
+# StackingRegressor([LinearRegression(), KNeighborsRegressor()], final_estimator=LinearRegression()).predict([[3, 4]]) and
+# StackingClassifier([GaussianNB(), KNeighborsClassifier()], final_estimator=LogisticRegression(tol=1e-12)).predict_proba
+# (a converged logistic fit; sklearn's default tol=1e-4 stops earlier)
+query II
+SELECT round(ml_predict(ml_fit_agg('StackingRegressor', r, [a, b], '{"estimators": [{"estimator": "OlsRegressor", "estimator_params": {}},
+           {"estimator": "KnnRegressor", "estimator_params": {}}], "final_estimator": {"estimator": "OlsRegressor", "estimator_params": {}}}'), [3.0, 4.0]), 6),
+       round(ml_predict_proba(ml_fit_agg('StackingClassifier', y, [a, b], '{"estimators": [{"estimator": "GaussianNB", "estimator_params": {}},
+           {"estimator": "KnnClassifier", "estimator_params": {}}]}'), [3.0, 4.0])[2], 6)
+FROM d;
+----
+2.026005	0.707041
+
+# with passthrough the final estimator also sees the features
+query I
+SELECT ml_r2(r, ml_predict(m, [a, b])) > 0.9 FROM d, (SELECT ml_fit_agg('StackingRegressor', r, [a, b],
+    '{"estimators": [{"estimator": "KnnRegressor", "estimator_params": {}}], "passthrough": true,
+      "final_estimator": {"estimator": "OlsRegressor", "estimator_params": {}}}') AS m FROM d) s;
+----
+true
+
+# CalibratedClassifierCV: probabilities in [0, 1] that sum to 1
+statement ok
+CREATE TABLE cal AS SELECT 'sigmoid' AS method, ml_fit_agg('CalibratedClassifierCV', y, [a, b], '{"estimator": "GaussianNB"}') AS m FROM d
+UNION ALL SELECT 'isotonic', ml_fit_agg('CalibratedClassifierCV', y, [a, b], '{"estimator": "GaussianNB", "method": "isotonic"}') FROM d
+UNION ALL SELECT 'svc', ml_fit_agg('CalibratedClassifierCV', y, [a, b]) FROM d
+UNION ALL SELECT 'single', ml_fit_agg('CalibratedClassifierCV', y, [a, b], '{"ensemble": false}') FROM d;
+
+query IIII
+SELECT method, min(list_min(p)) >= 0, max(list_max(p)) <= 1, max(abs(list_sum(p) - 1)) < 1e-12
+FROM (SELECT method, ml_predict_proba(m, [a, b]) AS p FROM d, cal) GROUP BY method ORDER BY method;
+----
+isotonic	true	true	true
+sigmoid	true	true	true
+single	true	true	true
+svc	true	true	true
+
+# scikit-learn: CalibratedClassifierCV(GaussianNB()).predict_proba([[3, 4]])[0, 1]
+query I
+SELECT round(ml_predict_proba(m, [3.0, 4.0])[2], 6) FROM cal WHERE method = 'sigmoid';
+----
+0.415367
+
+# TransformedTargetRegressor: OLS on ln(y) recovers exponential data exactly; plain OLS does not
+statement ok
+CREATE TABLE e AS SELECT (i % 10)::DOUBLE AS x, exp(1 + 0.3 * (i % 10)) AS y FROM range(50) t(i);
+
+query II
+SELECT max(abs(ml_predict(t, [x]) - y)) < 1e-9, max(abs(ml_predict(o, [x]) - y)) > 0.5
+FROM e, (SELECT ml_fit_agg('TransformedTargetRegressor', y, [x], '{"func": "log"}') AS t, ml_fit_agg('OlsRegressor', y, [x]) AS o FROM e);
+----
+true	true
+
+# a transformer kind on y: standardising y leaves a linear fit unchanged
+query I
+SELECT max(abs(ml_predict(t, [x]) - ml_predict(o, [x]))) < 1e-9 FROM e,
+    (SELECT ml_fit_agg('TransformedTargetRegressor', y, [x], '{"transformer": {"estimator": "StandardScaler", "estimator_params": {}},
+        "regressor": {"estimator": "OlsRegressor", "estimator_params": {}}}') AS t, ml_fit_agg('OlsRegressor', y, [x]) AS o FROM e);
+----
+true
+
+statement error
+SELECT ml_fit_agg('VotingRegressor', r, [a, b]) FROM d;
+----
+VotingRegressor needs at least one estimator

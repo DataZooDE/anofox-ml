@@ -158,6 +158,17 @@ char *anofox_ml_tune(const char *kind, const char *space, const char *options, c
                      AnofoxMlTuneResult *out);
 void anofox_ml_free_tune_result(AnofoxMlTuneResult r);
 
+// Recursive feature elimination (scikit-learn's RFE): support / ranking per
+// feature (n_cols each) and the model fitted on the selected features.
+typedef struct {
+    AnofoxMlDoubles support; // 1 = selected
+    AnofoxMlDoubles ranking; // 1 = selected, then 2, 3, ... (last dropped = 2)
+    AnofoxMlBytes model;
+} AnofoxMlRfeResult;
+char *anofox_ml_rfe(const char *kind, const char *params, const char *options, const double *x, size_t n_rows,
+                    size_t n_cols, const double *y, const char *const *y_labels, size_t threads, AnofoxMlRfeResult *out);
+void anofox_ml_free_rfe_result(AnofoxMlRfeResult r);
+
 // A fitted array (first of the comma-separated keys found in the fitted
 // state): rows x cols doubles, row-major. The key "feature_importances"
 // calls the model's feature_importances method.

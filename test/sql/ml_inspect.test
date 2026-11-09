@@ -66,3 +66,45 @@ statement error
 SELECT ml_permutation_importance_agg(model, y, [a, noise, b], '{"repeats": 3}') FROM d, m GROUP BY model;
 ----
 unknown field
+
+# Recursive feature elimination; supports and rankings of scikit-learn 1.9
+# RFE(LinearRegression() / LogisticRegression(), ...) on the same data
+statement ok
+CREATE TABLE rfe AS SELECT *, 3 * x[1] - 2 * x[3] + 0.5 * x[5] + ((i * 31) % 9) / 10.0 AS y FROM (
+    SELECT i, [(i % 7)::DOUBLE, ((13 * i) % 11)::DOUBLE, ((i * 7) % 5)::DOUBLE, (i % 3) * 1.0, ((i * 17) % 23) / 5.0, (i % 4) * 0.5] AS x
+    FROM range(200) t(i));
+
+query II
+SELECT s.support, s.ranking FROM (SELECT ml_rfe_agg('OlsRegressor', y, x, '{}', '{"n_features_to_select": 2}') AS s FROM rfe);
+----
+[true, false, true, false, false, false]	[1, 5, 1, 3, 2, 4]
+
+query II
+SELECT s.support, s.ranking FROM (SELECT ml_rfe_agg('OlsRegressor', y, x, '{}', '{"n_features_to_select": 3, "step": 2}') AS s FROM rfe);
+----
+[true, false, true, false, true, false]	[1, 3, 1, 2, 1, 3]
+
+query II
+SELECT s.support, s.ranking FROM (
+    SELECT ml_rfe_agg('LogisticRegressor', CASE WHEN y > m THEN 'hi' ELSE 'lo' END, x, '{}', '{"n_features_to_select": 2}') AS s
+    FROM rfe, (SELECT median(y) AS m FROM rfe));
+----
+[true, false, true, false, false, false]	[1, 5, 1, 4, 2, 3]
+
+# default: keep half; the model is fitted on the selected features, in order
+query III
+SELECT len(list_filter(s.support, lambda b: b)), ml_model_info(s.model).n_features,
+       abs(ml_predict(s.model, list_select(x, list_filter(range(1, 7), lambda j: s.support[j]))) - y) < 5
+FROM (SELECT ml_rfe_agg('RandomForestRegressor', y, x, '{"n_estimators": 20, "seed": 0}') AS s FROM rfe), rfe WHERE i = 10;
+----
+3	3	true
+
+statement error
+SELECT ml_rfe_agg('KnnRegressor', y, x) FROM rfe;
+----
+neither feature_importances nor coefficients
+
+statement error
+SELECT ml_rfe_agg('OlsRegressor', y, x, '{}', '{"step": 0}') FROM rfe;
+----
+step must be a positive count

@@ -407,7 +407,6 @@ SELECT avg(rmse), stddev(rmse) FROM (
 | Topic | Issue |
 |---|---|
 | TPE / Optuna-style tuning (rustuna) on top of `ml_tune_agg` | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
-| Semi-supervised fits with unlabelled (NULL-target) rows | [#44](https://github.com/DataZooDE/anofox-ml/issues/44) |
 | Everything else in anofox-ml 0.4 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
 ## 🧮 Estimators
@@ -430,13 +429,14 @@ Pass the `kind` exactly as listed. `SELECT * FROM ml_estimators()` shows the def
 | **Preprocessing** | `StandardScaler`, `MinMaxScaler`, `MaxAbsScaler`, `RobustScaler`, `Normalizer`, `Binarizer`, `PowerTransformer`, `QuantileTransformer`, `KBinsDiscretizer`, `PolynomialFeatures`, `SplineTransformer`, `RcsTransformer`, `TargetEncoder`, `SimpleImputer`, `KnnImputer`, `IterativeImputer`, `MissingIndicator`, `VarianceThreshold`, `SelectKBest`, `GenericUnivariateSelect`, `MutualInformationSelector`, `KernelCenterer`, `TfidfTransformer` |
 | **Meta-estimators** | `OneVsRestClassifier`, `OneVsOneClassifier`, `FixedThresholdClassifier`, `TunedThresholdClassifierCV`, `SelfTrainingClassifier`; they take a base `estimator` kind and `estimator_params` |
 | **Conformal** | `SplitConformalRegressor`, `CrossConformalRegressor`, `NormalizedConformalRegressor`, `ConformalizedQuantileRegressor`, `MondrianConformalRegressor`, `SplitConformalClassifier`, `MondrianConformalClassifier`; intervals and sets through `ml_predict_interval` / `ml_predict_set`, see [Conformal Prediction](#conformal-prediction) |
-| **Baselines & Semi-supervised** | `DummyClassifier`, `DummyRegressor`, `LabelPropagation`, `LabelSpreading` (unlabelled rows: [#44](https://github.com/DataZooDE/anofox-ml/issues/44)) |
+| **Baselines & Semi-supervised** | `DummyClassifier`, `DummyRegressor`, `LabelPropagation`, `LabelSpreading` (a NULL target marks an unlabelled row, see Behaviour Notes) |
 
 Linear models and GLMs **with statistical inference** (standard errors, tests, diagnostics) live in [anofox-statistics](https://github.com/DataZooDE/anofox-statistics). The linear models here are for prediction.
 
 ## 📝 Behaviour Notes
 
 - **NULLs:** rows with a NULL target, weight, feature list or NULL value inside the feature list are skipped when fitting, and predict NULL. The per-row aggregates return a NULL entry for such rows.
+- **Semi-supervised kinds** (`LabelPropagation`, `LabelSpreading`, `SelfTrainingClassifier`): a row with a NULL target is an *unlabelled* row and takes part in the fit; only NULL features skip a row. `-1` is never a class of these kinds (the library's unlabelled marker), and `classes` / `labels` list only the real classes. `ml_tune_agg` still skips unlabelled rows.
 - **Weights:** kinds without weighted fitting reject a `weight` with an error naming the kind.
 - **Row order:** `ml_cluster_agg`, `ml_outlier_score_agg` and `ml_fit_transform_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
 - **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`. With `VARCHAR` targets, the sorted distinct labels are stored as `labels`, the model learns their index, and `classes` / `ml_predict_proba` columns follow the label order.

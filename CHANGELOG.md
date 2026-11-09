@@ -6,6 +6,7 @@
 - `ml_feature_importances(model)` for tree and boosting kinds; `n_iter`, `inertia` and `oob_score` in `ml_model_info` (#10).
 - `ml_predict_interval` / `ml_predict_set` for the conformal kinds: split, CV+ / jackknife+, normalised, CQR, Mondrian and classifier sets (#6). New aggregates `ml_set_coverage`, `ml_mean_set_size` and `ml_mean_pinball_loss`.
 - Tests that model BLOBs saved with anofox-ml 0.2 still load and predict the same (#48).
+- Semi-supervised fits: for `LabelPropagation`, `LabelSpreading` and `SelfTrainingClassifier`, rows with a NULL target are unlabelled rows of the fit instead of being skipped (#44).
 
 ## [0.1.0] - 2026-11-08
 

@@ -136,6 +136,51 @@ unsafe fn strings<'a>(
         .collect()
 }
 
+/// Semi-supervised kinds: they fit on labelled and unlabelled rows, with
+/// `y = -1` marking an unlabelled row (`-1` is never a class).
+pub(crate) fn accepts_unlabelled(kind: &str) -> bool {
+    matches!(
+        kind,
+        "LabelPropagation" | "LabelSpreading" | "SelfTrainingClassifier"
+    )
+}
+
+/// Whether `kind` fits on unlabelled rows (see [`accepts_unlabelled`]);
+/// `ml_fit_agg` then passes rows with a NULL target as unlabelled.
+///
+/// # Safety
+/// `kind` is NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_accepts_unlabelled(kind: *const c_char) -> bool {
+    str_arg(kind, "kind").is_ok_and(accepts_unlabelled)
+}
+
+/// [`encode_labels`] where a NULL entry is an unlabelled row (code `-1`).
+unsafe fn labels_with_unlabelled(
+    y: *const *const c_char,
+    n: usize,
+) -> Result<(Vec<String>, Vec<f64>), String> {
+    if y.is_null() {
+        return Err("y is NULL".into());
+    }
+    let values = std::slice::from_raw_parts(y, n)
+        .iter()
+        .map(|&p| (!p.is_null()).then(|| str_arg(p, "y")).transpose())
+        .collect::<Result<Vec<Option<&str>>, String>>()?;
+    let known: Vec<&str> = values.iter().flatten().copied().collect();
+    let (labels, _) = encode_labels(&known);
+    let codes = values
+        .iter()
+        .map(|v| match v {
+            Some(v) => labels
+                .binary_search_by(|l| l.as_str().cmp(v))
+                .expect("present") as f64,
+            None => -1.0,
+        })
+        .collect();
+    Ok((labels, codes))
+}
+
 /// Sorted distinct labels and the code (index) of every value.
 pub(crate) fn encode_labels(values: &[&str]) -> (Vec<String>, Vec<f64>) {
     let mut labels: Vec<String> = values.iter().map(|s| s.to_string()).collect();
@@ -374,6 +419,9 @@ fn fit_impl(
     let classes = match y {
         Some(y) if model.capabilities().contains(&"predict_proba") => {
             let mut c = y.to_vec();
+            if accepts_unlabelled(kind) {
+                c.retain(|&v| v != -1.0);
+            }
             c.sort_by(f64::total_cmp);
             c.dedup();
             Some(c)
@@ -539,7 +587,11 @@ pub unsafe extern "C" fn anofox_ml_fit_labels(
             str_arg(params, "params")?
         };
         let x = matrix(x, n_rows, n_cols)?;
-        let (labels, codes) = encode_labels(&strings(y, n_rows, "y")?);
+        let (labels, codes) = if accepts_unlabelled(kind) {
+            labels_with_unlabelled(y, n_rows)?
+        } else {
+            encode_labels(&strings(y, n_rows, "y")?)
+        };
         let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
         fit_impl(
             kind,

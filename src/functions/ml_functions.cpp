@@ -136,6 +136,7 @@ struct FitState {
     std::vector<double> *y;
     std::vector<double> *w;
     std::vector<std::string> *labels; // string targets (has_labels)
+    std::vector<uint8_t> *unlabelled; // per label: 1 for a NULL target of a semi-supervised kind
     bool has_labels;
     std::vector<std::string> *sx; // VARCHAR features of an encoder (string_x)
     bool string_x;
@@ -158,6 +159,7 @@ void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
     s.y = new std::vector<double>();
     s.w = new std::vector<double>();
     s.labels = new std::vector<std::string>();
+    s.unlabelled = new std::vector<uint8_t>();
     s.has_labels = false;
     s.sx = new std::vector<std::string>();
     s.string_x = false;
@@ -175,6 +177,7 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.y;
         delete s.w;
         delete s.labels;
+        delete s.unlabelled;
         delete s.sx;
         delete s.options;
         delete s.used;
@@ -234,7 +237,9 @@ void CheckFitSize(const AggregateInputData &aggr, idx_t n_values) {
 }
 
 // Inputs: kind, [y,] x [, params [, weight]]; y is a string label when LABELS.
-template <bool HAS_Y, bool HAS_W = false, bool LABELS = false>
+// With UNLABELLED, a NULL y of a semi-supervised kind is kept as an
+// unlabelled row (y = -1, or a NULL label) instead of skipping the row.
+template <bool HAS_Y, bool HAS_W = false, bool LABELS = false, bool UNLABELLED = true>
 void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
     UnifiedVectorFormat kind_data, y_data, x_data, params_data, w_data, sdata;
@@ -266,8 +271,11 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         auto yi = HAS_Y ? y_data.sel->get_index(i) : 0;
         auto xi = x_data.sel->get_index(i);
         auto wi = HAS_W ? w_data.sel->get_index(i) : 0;
-        if (!kind_data.validity.RowIsValid(ki) || (HAS_Y && !y_data.validity.RowIsValid(yi)) ||
-            !x_data.validity.RowIsValid(xi) || (HAS_W && !w_data.validity.RowIsValid(wi))) {
+        const bool no_y = HAS_Y && !y_data.validity.RowIsValid(yi);
+        const bool unlabelled = UNLABELLED && no_y && kind_data.validity.RowIsValid(ki) &&
+                                anofox_ml_accepts_unlabelled(kinds[ki].GetString().c_str());
+        if (!kind_data.validity.RowIsValid(ki) || (no_y && !unlabelled) || !x_data.validity.RowIsValid(xi) ||
+            (HAS_W && !w_data.validity.RowIsValid(wi))) {
             s.used->push_back(0); // rows with a NULL kind, target, feature list or weight are skipped
             continue;
         }
@@ -298,9 +306,11 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
             s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
         }
         if (HAS_Y && LABELS) {
-            s.labels->push_back(UnifiedVectorFormat::GetData<string_t>(y_data)[yi].GetString());
+            s.labels->push_back(unlabelled ? std::string()
+                                           : UnifiedVectorFormat::GetData<string_t>(y_data)[yi].GetString());
+            s.unlabelled->push_back(unlabelled ? 1 : 0);
         } else if (HAS_Y) {
-            s.y->push_back(UnifiedVectorFormat::GetData<double>(y_data)[yi]);
+            s.y->push_back(unlabelled ? -1.0 : UnifiedVectorFormat::GetData<double>(y_data)[yi]);
         }
         if (HAS_W) {
             s.w->push_back(UnifiedVectorFormat::GetData<double>(w_data)[wi]);
@@ -391,6 +401,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
         tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
         tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
         tgt.labels->insert(tgt.labels->end(), src.labels->begin(), src.labels->end());
+        tgt.unlabelled->insert(tgt.unlabelled->end(), src.unlabelled->begin(), src.unlabelled->end());
         tgt.sx->insert(tgt.sx->end(), src.sx->begin(), src.sx->end());
         tgt.n_rows += src.n_rows;
         CheckFitSize(aggr, tgt.x->size() + tgt.sx->size());
@@ -420,8 +431,8 @@ void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
         } else if (s.has_labels) {
             std::vector<const char *> labels;
             labels.reserve(s.labels->size());
-            for (const auto &l : *s.labels) {
-                labels.push_back(l.c_str());
+            for (idx_t j = 0; j < s.labels->size(); j++) {
+                labels.push_back((*s.unlabelled)[j] ? nullptr : (*s.labels)[j].c_str());
             }
             Check(anofox_ml_fit_labels(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
                                        labels.data(), w, FitThreads(aggr), &blob),
@@ -444,7 +455,7 @@ void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
 //===--------------------------------------------------------------------===//
 template <bool LABELS>
 void TuneUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
-    FitUpdate<true, false, LABELS>(inputs, aggr, 4, state_vector, count);
+    FitUpdate<true, false, LABELS, false>(inputs, aggr, 4, state_vector, count);
     if (input_count < 5) {
         return;
     }

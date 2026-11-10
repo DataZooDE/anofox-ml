@@ -72,7 +72,17 @@ A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-
 
 ## Installation
 
-The extension is not published as a DuckDB community extension yet; that is on hold until the API has matured. Download a prebuilt binary from a GitHub release, or build it from source.
+### From the Community Extensions Repository
+
+anofox_ml is a [DuckDB community extension](https://duckdb.org/community_extensions/) for DuckDB v1.5.6 and v2.0.0 on Linux, macOS, Windows and DuckDB-Wasm:
+
+```sql
+INSTALL anofox_ml FROM community;
+LOAD anofox_ml;
+SELECT ml_version();
+```
+
+You can also download a prebuilt binary from a GitHub release, or build it from source.
 
 ### From a GitHub Release
 

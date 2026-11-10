@@ -74,6 +74,16 @@ corrosion_import_crate(
     CRATES "anofox_ml_ffi"
 )
 
+# A DuckDB-Wasm extension is a side module, so everything linked into it must
+# be position independent: the C code the Rust crates compile with `cc`
+# (zstd) included (wasm-ld: "relocation R_WASM_MEMORY_ADDR_SLEB cannot be
+# used against symbol ...; recompile with -fPIC").
+if(EMSCRIPTEN)
+    corrosion_add_target_rustflags(anofox_ml_ffi -Crelocation-model=pic)
+    corrosion_set_env_vars(anofox_ml_ffi "CFLAGS_wasm32_unknown_emscripten=-fPIC"
+                                          "CXXFLAGS_wasm32_unknown_emscripten=-fPIC")
+endif()
+
 # Set extension name here
 set(TARGET_NAME anofox_ml)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)

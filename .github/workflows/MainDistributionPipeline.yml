@@ -35,7 +35,7 @@ jobs:
       extension_name: anofox_ml
       enable_rust: true
       reduced_ci_mode: disabled
-      # The wasm builds don't link the Rust core yet (DataZooDE/anofox-ml#29).
+      # DuckDB-Wasm builds come from the wasm job (DuckDB 1.5.6 only).
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
 
   # DuckDB-Wasm builds: extension-ci-tools' wasm job with a current Rust
@@ -98,6 +98,10 @@ jobs:
 
       - name: Build Wasm module
         run: EXTENSION_NAME=anofox_ml ENABLE_EXTENSION_AUTOINSTALL=1 ENABLE_EXTENSION_AUTOLOADING=1 make ${{ matrix.duckdb_arch }}
+
+      # The Rust FFI must be linked into the module, not left as imports (#29).
+      - name: Check the Rust FFI is linked
+        run: python3 scripts/check_wasm_imports.py build/${{ matrix.duckdb_arch }}/extension/anofox_ml/anofox_ml.duckdb_extension.wasm
 
       - uses: actions/upload-artifact@v4
         with:
@@ -164,9 +168,8 @@ jobs:
           path: artifacts
 
       # DuckDB derives the entry point from the file name, so each platform
-      # ships as a zip holding anofox_ml.duckdb_extension under that name.
-      # The wasm builds are left out: they don't link the Rust core yet
-      # (DataZooDE/anofox-ml#29).
+      # ships as a zip holding anofox_ml.duckdb_extension (.wasm for
+      # DuckDB-Wasm) under that name.
       - name: Collect binaries
         run: |
           mkdir dist
@@ -174,8 +177,7 @@ jobs:
             arch="${dir##*-extension-}"
             duckdb="${dir#artifacts/anofox_ml-}"
             duckdb="${duckdb%%-extension-*}"
-            case "$arch" in wasm_*) continue ;; esac
-            (cd "$dir" && zip -9 "$GITHUB_WORKSPACE/dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-${duckdb}-${arch}.zip" anofox_ml.duckdb_extension)
+            (cd "$dir" && zip -9 "$GITHUB_WORKSPACE/dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-${duckdb}-${arch}.zip" anofox_ml.duckdb_extension*)
           done
           (cd dist && sha256sum * > SHA256SUMS)
           ls -l dist

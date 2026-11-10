@@ -1,5 +1,5 @@
 # name: test/sql/ml_text.test
-# description: hashing vectorizer (scikit-learn HashingVectorizer)
+# description: hashing vectorizer (scikit-learn HashingVectorizer) and the text vectorizer kinds
 # group: [anofox_ml]
 
 require anofox_ml
@@ -82,3 +82,77 @@ FROM (VALUES ('cheap money'), ('meeting tomorrow')) n(body), m ORDER BY body;
 ----
 cheap money	spam
 meeting tomorrow	ham
+
+# Text vectorizer kinds fitted on a VARCHAR column. scikit-learn 1.8: TfidfVectorizer().fit(docs);
+# the vocabulary is sorted: and best cat cats dog dogs friends log mat of on sat the
+statement ok
+CREATE TABLE docs AS SELECT * FROM (VALUES (1, 'The cat sat on the mat.'), (2, 'The dog sat on the log!'),
+    (3, 'Cats and dogs: the best of friends'), (4, 'A dog, a cat, a mat'), (5, NULL)) v(id, body);
+
+statement ok
+CREATE TABLE tv AS SELECT ml_fit_agg('TfidfVectorizer', body) AS m FROM docs;
+
+query II
+SELECT id, list_transform(ml_transform(m, body), lambda v: round(v, 6)) FROM docs, tv ORDER BY id;
+----
+1	[0.0, 0.0, 0.388611, 0.0, 0.0, 0.0, 0.0, 0.0, 0.388611, 0.0, 0.388611, 0.388611, 0.629228]
+2	[0.0, 0.0, 0.0, 0.0, 0.371891, 0.0, 0.0, 0.471697, 0.0, 0.0, 0.371891, 0.371891, 0.602156]
+3	[0.395056, 0.395056, 0.0, 0.395056, 0.0, 0.395056, 0.395056, 0.0, 0.0, 0.395056, 0.0, 0.0, 0.252159]
+4	[0.0, 0.0, 0.57735, 0.0, 0.57735, 0.0, 0.0, 0.0, 0.57735, 0.0, 0.0, 0.0, 0.0]
+5	NULL
+
+# unknown words are ignored; the vocabulary and idf are in ml_model_fitted
+query II
+SELECT list_transform(ml_transform(m, 'the unknown cat'), lambda v: round(v, 6)),
+       ml_model_fitted(m) LIKE '{"counts":{"vocabulary":["and","best","cat","cats","dog","dogs","friends","log","mat","of","on","sat","the"]},"idf":[1.916290731874155,%'
+FROM tv;
+----
+[0.0, 0.0, 0.777221, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.629228]	true
+
+# CountVectorizer (with min_df) and HashingVectorizer, as scikit-learn
+query III
+SELECT ml_transform(ml_fit_agg('CountVectorizer', body), 'the cat and the dog the end'),
+       len(ml_transform(ml_fit_agg('CountVectorizer', body, '{"min_df": 2}'), 'cat')),
+       list_transform(ml_transform(ml_fit_agg('HashingVectorizer', body, '{"n_features": 8}'), 'the cat sat on the mat'), lambda v: round(v, 6))
+FROM docs;
+----
+[1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]	6	[0.0, 0.0, 0.0, -0.408248, 0.408248, 0.0, -0.816497, 0.0]
+
+# a fit per group: docs 2 and 4 have 7 distinct words, docs 1 and 3 have 11 (one-letter tokens are dropped)
+query II
+SELECT g, len(ml_transform(m, 'cat')) FROM (SELECT id % 2 AS g, ml_fit_agg('CountVectorizer', body) AS m FROM docs GROUP BY g) ORDER BY g;
+----
+0	7
+1	11
+
+# TfidfVectorizer -> LinearSvc on the words of the mails
+query II
+WITH tf AS (SELECT ml_fit_agg('TfidfVectorizer', body) AS v FROM mails),
+     m AS (SELECT v, ml_fit_agg('LinearSvc', label, ml_transform(v, body)) AS model FROM mails, tf GROUP BY v)
+SELECT body, ml_predict_label(model, ml_transform(v, body))
+FROM (VALUES ('cheap money'), ('meeting tomorrow'), ('win a prize'), ('notes from the lunch meeting')) n(body), m ORDER BY body;
+----
+cheap money	spam
+meeting tomorrow	ham
+notes from the lunch meeting	ham
+win a prize	spam
+
+statement error
+SELECT ml_fit_agg('Pca', body) FROM docs;
+----
+Pca does not support fit_text
+
+statement error
+SELECT ml_fit_agg('TfidfVectorizer', [1.0, 2.0]) FROM docs;
+----
+TfidfVectorizer is fitted on documents: use ml_fit_agg('TfidfVectorizer', text VARCHAR [, params])
+
+statement error
+SELECT ml_transform(m, [1.0]) FROM tv;
+----
+TfidfVectorizer encodes documents: use ml_transform(model, text VARCHAR)
+
+statement error
+SELECT ml_transform(ml_fit_agg('StandardScaler', [1.0]), 'cat');
+----
+StandardScaler does not support transform_text

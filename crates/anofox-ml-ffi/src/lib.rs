@@ -361,6 +361,11 @@ fn fit_model(
     threads: usize,
 ) -> Result<Box<dyn DynModel>, String> {
     let mut model = make_model(kind, params)?;
+    if model.capabilities().contains(&"fit_text") {
+        return Err(format!(
+            "{kind} is fitted on documents: use ml_fit_agg('{kind}', text VARCHAR [, params])"
+        ));
+    }
     run_fit(threads, || model.fit(x, y, w))?.map_err(|e| e.to_string())?;
     Ok(model)
 }
@@ -1258,6 +1263,12 @@ fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>
         return Err(format!("unknown method '{method}' (known: {METHODS:?})"));
     }
     with_model(blob, |meta, model| {
+        if method == "transform" && model.capabilities().contains(&"transform_text") {
+            return Err(format!(
+                "{} encodes documents: use ml_transform(model, text VARCHAR)",
+                meta.kind
+            ));
+        }
         require_method(&meta.kind, model, method)?;
         match (method, meta.y_columns) {
             ("transform_y", Some(cols)) if x.ncols() != cols => {

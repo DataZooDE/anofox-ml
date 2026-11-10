@@ -201,6 +201,16 @@ char *anofox_ml_fit_offset(const char *kind, const char *params, const double *x
 char *anofox_ml_predict_offset(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,
                                size_t n_cols, const double *offset, AnofoxMlDoubles *out);
 
+// Fit a text kind (CountVectorizer, TfidfVectorizer, HashingVectorizer) on
+// n_docs documents; `out` receives the BLOB.
+char *anofox_ml_fit_text(const char *kind, const char *params, const char *const *docs, size_t n_docs, size_t threads,
+                         AnofoxMlBytes *out);
+
+// Encode n_docs documents with a fitted text kind; `out` receives
+// n_docs * out_cols doubles, row-major.
+char *anofox_ml_transform_text(const uint8_t *model, size_t model_len, const char *const *docs, size_t n_docs,
+                               AnofoxMlDoubles *out, size_t *out_cols);
+
 // Continue training a fitted model on n_rows new rows (warm start of the
 // boosting kinds), after merging the JSON params; targets y (doubles), or
 // the model's string labels y_labels when y is NULL.

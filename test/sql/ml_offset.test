@@ -1,0 +1,153 @@
+# name: test/sql/ml_offset.test
+# description: GLM offsets / exposure, CCA Y scores, model-based feature selection kinds
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# Counts at the rate exp(0.2 + 0.5 x) per unit of exposure e (1..7).
+statement ok
+CREATE TABLE g AS SELECT (i % 20) / 10.0 AS x, 1 + (i % 7) AS e,
+    (1 + (i % 7)) * exp(0.2 + 0.5 * ((i % 20) / 10.0)) AS y
+FROM range(200) t(i);
+
+statement ok
+CREATE TABLE gm AS SELECT ml_fit_with_offset_agg('PoissonRegressor', y, [x], ln(e), '{"alpha": 0}') AS m FROM g;
+
+# the log-exposure offset recovers the rate
+query II
+SELECT round(ml_coefficients(m).coef[1][1], 6), round(ml_coefficients(m).intercept[1], 6) FROM gm;
+----
+0.5	0.2
+
+# ml_predict without an offset predicts the rate (offset 0); with ln(exposure) the expected count
+query III
+SELECT abs(ml_predict(m, [1.0]) - exp(0.7)) < 1e-9,
+       abs(ml_predict(m, [1.0], ln(3.0)) - 3 * exp(0.7)) < 1e-9,
+       abs(ml_predict(m, [1.0], ln(3.0)) / ml_predict(m, [1.0]) - 3) < 1e-9
+FROM gm;
+----
+true	true	true
+
+# per-row offsets reproduce the training targets; a NULL offset gives NULL
+query II
+SELECT max(abs(ml_predict(m, [x], ln(e)) - y)) < 1e-9, count(ml_predict(m, [x], NULL::DOUBLE)) FROM g, gm;
+----
+true	0
+
+# without the offset the rate is confounded with exposure
+query I
+SELECT abs(ml_coefficients(ml_fit_agg('PoissonRegressor', y, [x], '{"alpha": 0}')).intercept[1] - 0.2) > 0.5 FROM g;
+----
+true
+
+# rows with a NULL offset are skipped
+query I
+SELECT round(ml_coefficients(ml_fit_with_offset_agg('PoissonRegressor', y, [x],
+    CASE WHEN x > 1.5 THEN NULL ELSE ln(e) END, '{"alpha": 0}')).coef[1][1], 6) FROM g;
+----
+0.5
+
+# Gamma and Tweedie (log link) take offsets too
+query II
+SELECT round(ml_coefficients(ml_fit_with_offset_agg('GammaRegressor', y, [x], ln(e),
+           '{"inner": {"alpha": 0, "confidence_level": 0.95, "inference": false, "link_power": 0, "max_iter": 100, "power": 2, "tol": 1e-8, "with_intercept": true}}')).coef[1][1], 6),
+       round(ml_coefficients(ml_fit_with_offset_agg('TweedieRegressor', y, [x], ln(e),
+           '{"alpha": 0, "power": 1.5, "link_power": 0}')).coef[1][1], 6)
+FROM g;
+----
+0.5	0.5
+
+# BinomialRegressor: proportions with trial counts as weights, offset on the logit scale
+statement ok
+CREATE TABLE b AS SELECT (i % 20) / 10.0 AS x, 0.3 * (i % 3) AS off, (1 + i % 5)::DOUBLE AS n,
+    1.0 / (1 + exp(-(-1 + (i % 20) / 10.0 + 0.3 * (i % 3)))) AS p
+FROM range(300) t(i);
+
+query III
+SELECT round(ml_coefficients(m).coef[1][1], 6), round(ml_coefficients(m).intercept[1], 6),
+       abs(ml_predict(m, [1.0], 0.6) - 1 / (1 + exp(-0.6))) < 1e-9
+FROM (SELECT ml_fit_with_offset_agg('BinomialRegressor', p, [x], off, '{}', n) AS m FROM b);
+----
+1.0	-1.0	true
+
+statement error
+SELECT ml_fit_with_offset_agg('OlsRegressor', y, [x], ln(e)) FROM g;
+----
+OlsRegressor does not support fit_with_offset
+
+statement error
+SELECT ml_predict(ml_fit_agg('OlsRegressor', y, [x]), [1.0], 0.0) FROM g;
+----
+OlsRegressor does not support predict_with_offset
+
+# CCA fitted on [X | Y] (y_columns = 2): X scores with ml_transform, Y scores with ml_transform_y.
+# scikit-learn: CCA(n_components=1).fit(X, Y).transform(X, Y), rows 0..2.
+statement ok
+CREATE TABLE c AS SELECT i, (i % 5)::DOUBLE AS x1, ((i * 7) % 11)::DOUBLE AS x2,
+    (i % 5) + 0.5 * ((i * 3) % 4) AS y1, ((i * 7) % 11) - (i % 5) + (i % 3) AS y2
+FROM range(12) t(i);
+
+statement ok
+CREATE TABLE cm AS SELECT ml_fit_agg('Cca', [x1, x2, y1, y2], '{"n_components": 1, "y_columns": 2}') AS m FROM c;
+
+query III
+SELECT i, round(ml_transform(m, [x1, x2])[1], 6), round(ml_transform_y(m, [y1, y2])[1], 6)
+FROM c, cm WHERE i < 3 ORDER BY i;
+----
+0	-0.193578	-0.612082
+1	0.854768	1.086411
+2	-0.451404	-0.426507
+
+# the stored width is that of X
+query I
+SELECT ml_model_info(m).n_features FROM cm;
+----
+2
+
+statement error
+SELECT ml_transform_y(m, [y1]) FROM c, cm;
+----
+Cca was fitted on 2 Y columns, got 1
+
+statement error
+SELECT ml_transform_y(m, [x1, x2]) FROM c, (SELECT ml_fit_agg('Pca', [x1, x2]) AS m FROM c) p;
+----
+Pca does not support transform_y
+
+# Feature selection with a nested estimator: y depends on a and b only.
+statement ok
+CREATE TABLE s AS SELECT (i % 13)::DOUBLE AS a, ((i * 7) % 17)::DOUBLE AS b, ((i * 5) % 11)::DOUBLE AS c,
+    ((i * 3) % 19)::DOUBLE AS d, 3 * (i % 13) - 2 * ((i * 7) % 17) + ((hash(i) % 1000) / 1000.0 - 0.5) * 0.1 AS y
+FROM range(200) t(i);
+
+# ml_transform keeps the selected columns; the selections match scikit-learn's RFE,
+# RFECV (which keeps c: its CV score is marginally higher) and SequentialFeatureSelector
+query II
+SELECT k, ml_transform(m, [1, 2, 3, 4]) FROM (
+    SELECT 'Rfe' AS k, ml_fit_agg('Rfe', y, [a, b, c, d], '{"n_features_to_select": 2}') AS m FROM s
+    UNION ALL SELECT 'Rfecv', ml_fit_agg('Rfecv', y, [a, b, c, d], '{"cv": 3}') FROM s
+    UNION ALL SELECT 'SequentialFeatureSelector',
+        ml_fit_agg('SequentialFeatureSelector', y, [a, b, c, d], '{"n_features_to_select": 2, "cv": 3}') FROM s)
+ORDER BY k;
+----
+Rfe	[1.0, 2.0]
+Rfecv	[1.0, 2.0, 3.0]
+SequentialFeatureSelector	[1.0, 2.0]
+
+# the support mask is in ml_model_fitted; Rfe predicts with the model refitted on the selection
+query II
+SELECT ml_model_fitted(m) LIKE '{"support":[true,true,false,false],"ranking":[1,1,2,3]%', round(ml_predict(m, [1, 2, 3, 4]), 2)
+FROM (SELECT ml_fit_agg('Rfe', y, [a, b, c, d], '{"n_features_to_select": 2}') AS m FROM s);
+----
+true	-1.0
+
+# a nested estimator with its own parameters
+query I
+SELECT ml_transform(ml_fit_agg('SequentialFeatureSelector', y, [a, b, c, d],
+    '{"n_features_to_select": 2, "cv": 3, "estimator": "RandomForestRegressor", "estimator_params": {"n_estimators": 20, "seed": 0}}'),
+    [1, 2, 3, 4]) FROM s;
+----
+[1.0, 2.0]

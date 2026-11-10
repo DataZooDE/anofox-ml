@@ -8,6 +8,9 @@
 
 ### Added
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
+- GLM offsets / exposure: `ml_fit_with_offset_agg(kind, y, x, offset [, params [, weight]])` and `ml_predict(model, x, offset)` for Poisson, Gamma, Tweedie and Binomial regression (#18).
+- `ml_transform_y(model, y)`: Y scores of `Cca`, `PlsCanonical` and `PlsSvd`. Models fitted on `[X | Y]` (`y_columns`) store the width of X, so `ml_transform` / `ml_predict` take X alone (#18).
+- The feature selection kinds `Rfe`, `Rfecv` and `SequentialFeatureSelector` (nested estimator) work through `ml_fit_agg` / `ml_transform`, matching scikit-learn (#18).
 - `ml_partial_fit_agg`: incremental batches for naive Bayes, SGD, PassiveAggressive, MLP, the scalers and IncrementalPca; MLP warm start through `ml_warm_start_agg` (#17).
 - `ml_kneighbors(model, x [, k])`: nearest training rows of the kNN models (#16).
 - DuckDB 2.0 support: the same source builds and passes the tests against DuckDB v1.5.6 and v2.0.0; CI builds both and releases attach binaries for both (#66).

@@ -1336,7 +1336,23 @@ void MlPredictFunction(DataChunk &args, ExpressionState &state, Vector &result) 
     auto out = compat::FlatData<double>(result);
     ApplyBatched(args, "ml_predict", "predict", result, [&](idx_t row, const double *v, size_t n) {
         if (n != 1) {
-            throw InvalidInputException("ml_predict: the model returns %llu values per row; use ml_transform",
+            throw InvalidInputException(
+                "ml_predict: the model predicts %llu targets per row; use ml_predict_targets (or ml_transform)",
+                (unsigned long long)n);
+        }
+        out[row] = v[0];
+    });
+}
+
+//===--------------------------------------------------------------------===//
+// ml_predict_std(model BLOB, x DOUBLE[]) -> DOUBLE
+// Standard deviation of the predictive distribution (GaussianProcessRegressor).
+//===--------------------------------------------------------------------===//
+void MlPredictStdFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto out = compat::FlatData<double>(result);
+    ApplyBatched(args, "ml_predict_std", "predict_std", result, [&](idx_t row, const double *v, size_t n) {
+        if (n != 1) {
+            throw InvalidInputException("ml_predict_std: the model returns %llu values per row",
                                         (unsigned long long)n);
         }
         out[row] = v[0];
@@ -1669,6 +1685,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         loader.RegisterFunction(predict_set);
     }
     loader.RegisterFunction(Fallible(ScalarFunction("ml_predict_label", model_and_x, VL, MlPredictLabelFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_predict_std", model_and_x, DL, MlPredictStdFunction)));
     const vector<LogicalType> model_x_alpha {BL, LogicalType::LIST(DL), DL};
     loader.RegisterFunction(
         Fallible(ScalarFunction("ml_predict_interval", model_x_alpha, IntervalType(), MlPredictIntervalFunction)));
@@ -1755,7 +1772,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const std::pair<const char *, const char *> list_functions[] = {
         {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
 {"ml_predict_log_proba", "predict_log_proba"}, {"ml_inverse_transform", "inverse_transform"},
-        {"ml_transform_y", "transform_y"},
+        {"ml_transform_y", "transform_y"}, {"ml_predict_targets", "predict"},
         {"ml_score_samples", "score_samples"}, {"ml_staged_predict", "staged_predict"},
     };
     for (const auto &f : list_functions) {

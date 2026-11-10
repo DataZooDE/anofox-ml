@@ -204,9 +204,11 @@ SELECT kind, default_params FROM ml_estimators();
 | `ml_partial_fit_agg(model, [y,] [x1, x2, …] [, params])` | Aggregate: fold the group's rows into a stored model as one more batch (`partial_fit`). Works for the naive Bayes kinds, SGD, PassiveAggressive and MLP models, and without `y` for StandardScaler, MinMaxScaler, MaxAbsScaler and IncrementalPca. For naive Bayes and the scalers, batches give the same model as one fit. Classes are fixed by the first fit |
 | `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |
 | `ml_fit_with_offset_agg(kind, y, [x1, x2, …], offset [, params [, weight]])` | `ml_fit_agg` for the GLMs with an offset per row on the link scale, e.g. `ln(exposure)` for counts: `PoissonRegressor`, `GammaRegressor`, `TweedieRegressor` and `BinomialRegressor` (proportions `y`, trial counts as `weight`). Rows with a NULL offset are skipped |
-| `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …), and for the kinds fitted on `[X \| Y]` with `y_columns` (`Cca`, `PlsCanonical`, `PlsSvd`): pass `list_concat(x, y)`; the model then takes `X` alone |
+| `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …), and for the kinds fitted on `[X \| Y]` with `y_columns` (`MultiOutputRegressor`, `RegressorChain`, `MultiTask*`, `Cca`, `PlsCanonical`, `PlsSvd`): pass `list_concat(x, y)`; the model then takes `X` alone |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
 | `ml_predict(model, [x1, x2, …], offset)` | GLM prediction with an offset on the link scale (a model from `ml_fit_with_offset_agg`); `ml_predict(model, x)` predicts at offset 0 |
+| `ml_predict_targets(model, [x1, x2, …])` | One prediction per target (`DOUBLE[]`) of the multi-output kinds (`MultiOutputRegressor`, `RegressorChain`, `MultiTaskLasso`, …); `ml_predict` asks for it when a model predicts several targets |
+| `ml_predict_std(model, [x1, x2, …])` | Standard deviation of the predictive distribution (`DOUBLE`) of a `GaussianProcessRegressor` |
 | `ml_predict_label(model, [x1, x2, …])` | Predicted class as `VARCHAR`: the label of a model fitted on string labels, otherwise the class value as text |
 | `ml_predict_proba(model, [x1, x2, …])` | Class probabilities (`DOUBLE[]`), in the order of `ml_model_info(model).classes` |
 | `ml_predict_log_proba(model, [x1, x2, …])` | `ln` of the class probabilities (`DOUBLE[]`) |
@@ -305,7 +307,7 @@ Two ways to get prediction intervals (regressors) and prediction sets (classifie
 | Function | Description |
 |---|---|
 | `ml_conformalize_agg(model, y, [x1, x2, …])` | Aggregate over calibration rows: a copy of `model` with its conformity scores (absolute residuals for regressors, `1 − p(true class)` for classifiers). `y` may be `VARCHAR` for a model fitted on string labels |
-| `ml_predict_interval(model, [x1, x2, …], alpha)` | `STRUCT(lower, upper)`: for a calibrated model, prediction ± the conformal quantile of the residuals (infinite when there are too few calibration rows for `alpha`); for a conformal kind, its own interval |
+| `ml_predict_interval(model, [x1, x2, …], alpha)` | `STRUCT(lower, upper)`: for a calibrated model, prediction ± the conformal quantile of the residuals (infinite when there are too few calibration rows for `alpha`); for a conformal kind, its own interval; for `OlsRegressor` / `RidgeRegressor` fitted with `{"inference": true}`, the classical prediction interval at level `1 − alpha` |
 | `ml_predict_set(model, [x1, x2, …], alpha)` | `VARCHAR[]` of the classes whose score is within the conformal quantile (calibrated model) or in the conformal kind's set |
 | `ml_conformal_margin(y, y_pred, alpha)` | Aggregate: the conformal quantile of `abs(y − y_pred)`, model-free |
 | `ml_set_coverage(y, prediction_set)` / `ml_mean_set_size(prediction_set)` | Aggregates: the share of rows whose set contains `y`, and the mean set size |
@@ -517,6 +519,30 @@ WITH m AS (SELECT ml_fit_agg('Cca', [x1, x2, x3, y1, y2], '{"n_components": 2, "
 SELECT ml_transform(cca, [x1, x2, x3]) AS x_scores, ml_transform_y(cca, [y1, y2]) AS y_scores FROM t, m;
 ```
 
+**Several targets at once.** The multi-output kinds fit on `[X | Y]`: append the targets to the features and give their count as `y_columns` (default 2). `MultiOutputRegressor` fits one nested `estimator` per target, `RegressorChain` feeds earlier predictions to later targets (`order`), `MultiTaskLasso` / `MultiTaskElasticNet` (and their CV kinds) share the sparsity pattern across targets. `ml_predict_targets` returns one value per target:
+
+```sql
+WITH m AS (SELECT ml_fit_agg('MultiOutputRegressor', [price, promo, units, revenue],
+                  '{"estimator": "HistGradientBoostingRegressor", "y_columns": 2}') AS model FROM sales)
+SELECT ml_predict_targets(model, [price, promo]) AS units_and_revenue FROM plan, m;
+```
+
+**Gaussian process uncertainty.** `GaussianProcessRegressor` (scikit-learn's default `1.0 * RBF(1.0)`, fixed hyperparameters) gives a predictive standard deviation next to its mean: small at the training points, approaching the prior's (1.0) far from them:
+
+```sql
+SELECT x, ml_predict(gp, [x]) AS mean, ml_predict(gp, [x]) + 1.96 * ml_predict_std(gp, [x]) AS upper95
+FROM grid, (SELECT ml_fit_agg('GaussianProcessRegressor', y, [x]) AS gp FROM train);
+```
+
+**Classical linear fits.** `OlsRegressor` and `RidgeRegressor` with `{"inference": true}` keep their full fit: `ml_predict_interval(model, x, alpha)` gives prediction intervals at level `1 − alpha` (no calibration set needed, but they assume Gaussian, homoscedastic errors), and `ml_model_fitted(model)` holds the coefficient table under `summary` (`coefficients`, `std_errors`, `statistics`, `p_values`, `conf_lower` / `conf_upper` at `confidence_level`, and the intercept's):
+
+```sql
+WITH m AS (SELECT ml_fit_agg('OlsRegressor', y, [x1, x2], '{"inference": true}') AS model FROM train)
+SELECT ml_predict_interval(model, [x1, x2], 0.05) AS pi95,
+       json_extract(ml_model_fitted(model), '$.summary.p_values.data') AS p_values
+FROM test, m;
+```
+
 **Multivariate drift.** `ml_domain_classifier_drift_by` flags chunks whose rows a classifier can tell apart from a reference chunk. To see which features drift, fit the same classifier on reference + chunk and read its importances:
 
 ```sql
@@ -574,7 +600,7 @@ Pass the `kind` exactly as listed. `SELECT * FROM ml_estimators()` shows the def
 | **Baselines & Semi-supervised** | `DummyClassifier`, `DummyRegressor`, `LabelPropagation`, `LabelSpreading` (a NULL target marks an unlabelled row, see Behaviour Notes) |
 | **Gaussian Processes** | `GaussianProcessRegressor`, `GaussianProcessClassifier` |
 
-Linear models and GLMs **with statistical inference** (standard errors, tests, diagnostics) live in [anofox-statistics](https://github.com/DataZooDE/anofox-statistics). The linear models here are for prediction.
+Linear models and GLMs **with statistical inference** (standard errors, tests, diagnostics) live in [anofox-statistics](https://github.com/DataZooDE/anofox-statistics). The linear models here are for prediction; `OlsRegressor` / `RidgeRegressor` with `inference: true` add a coefficient table and prediction intervals. `IsotonicRegressor` takes exactly one feature; `PlsRegression` takes one target `y`.
 
 ## 📝 Behaviour Notes
 

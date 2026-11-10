@@ -71,10 +71,10 @@ The extension is not published as a DuckDB community extension yet; that is on h
 
 ### From a GitHub Release
 
-Every [release](https://github.com/DataZooDE/anofox-ml/releases) has a zip per platform (Linux, macOS and Windows; amd64 / arm64) and DuckDB version, since DuckDB v1.5.6 and v2.0.0 are both supported. The DuckDB version is part of the file name, e.g. `anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip` or `…-duckdb-v2.0.0-linux_amd64.zip`. A binary loads only into the DuckDB version it was built for. Unzip it and keep the file name `anofox_ml.duckdb_extension`, because DuckDB derives the entry point from the name. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
+Every [release](https://github.com/DataZooDE/anofox-ml/releases) has a zip per platform (Linux, macOS and Windows; amd64 / arm64) and DuckDB version, since DuckDB v1.5.6 and v2.0.0 are both supported. The DuckDB version is part of the file name, e.g. `anofox_ml-v0.2.0-duckdb-v1.5.6-linux_amd64.zip` or `…-duckdb-v2.0.0-linux_amd64.zip`. A binary loads only into the DuckDB version it was built for. Unzip it and keep the file name `anofox_ml.duckdb_extension`, because DuckDB derives the entry point from the name. The binaries are not signed, so DuckDB needs `allow_unsigned_extensions`:
 
 ```bash
-unzip anofox_ml-v0.1.0-duckdb-v1.5.6-linux_amd64.zip
+unzip anofox_ml-v0.2.0-duckdb-v1.5.6-linux_amd64.zip
 duckdb -unsigned
 ```
 

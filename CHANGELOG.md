@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-11-10
+
+Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/sipemu/anofox-ml) **0.5** from crates.io. This is the version submitted as a DuckDB community extension (#4). The release binaries are unsigned; see [Installation](https://github.com/DataZooDE/anofox-ml#installation).
 
 ### Changed
 - `ml_inverse_transform` no longer rejects inputs of the transformed width (PCA components, one-hot columns); the model checks the width itself (#11).

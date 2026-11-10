@@ -147,9 +147,51 @@ if(APPLE AND ANOFOX_TELEMETRY_ENABLED)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation" "-framework Security")
 endif()
 
+# Make the Rust staticlib's hand-written asm kernels local symbols (#68).
+#
+# private-gemm-x86 (faer's GEMM backend) emits its kernels with global_asm! as
+# default-visibility global symbols (gemm_v0_*) that tail-jump to each other
+# with a private register convention (live state in scratch registers such as
+# r10/r11 across the jumps).
+# When the static extension is linked into a shared libduckdb.so, those
+# symbols are exported and preemptible, so the linker routes the jumps through
+# the PLT. The first jump then goes through the dynamic loader's lazy-binding
+# resolver, which only preserves the SysV argument registers, and the kernels
+# continue with clobbered registers (LD_BIND_NOW=1 avoids the crash): wrong results or a segfault in
+# private_gemm_x86::pack_lhs. Executables and the loadable extension
+# (-Wl,--exclude-libs,ALL) bind the symbols locally and are not affected.
+# Localizing the symbols in a copy of the archive makes the jumps direct
+# wherever the library ends up. pulp's libpulp_v* asm symbols get the same
+# treatment. All of these are defined and referenced in the single LTO object
+# of the staticlib, so making them local cannot break cross-object references.
+set(ANOFOX_ML_FFI_LIB anofox_ml_ffi-static)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN AND CMAKE_OBJCOPY)
+    set(ANOFOX_ML_FFI_LOCAL_ARCHIVE "${CMAKE_CURRENT_BINARY_DIR}/libanofox_ml_ffi_local.a")
+    add_custom_command(
+        OUTPUT "${ANOFOX_ML_FFI_LOCAL_ARCHIVE}"
+        COMMAND "${CMAKE_OBJCOPY}" --wildcard
+                "--localize-symbol=gemm_v[0-9]*_*"
+                "--localize-symbol=libpulp_v[0-9]*_*"
+                "$<TARGET_FILE:anofox_ml_ffi-static>" "${ANOFOX_ML_FFI_LOCAL_ARCHIVE}"
+        DEPENDS "$<TARGET_FILE:anofox_ml_ffi-static>"
+        COMMENT "Localizing asm kernel symbols in libanofox_ml_ffi.a"
+        VERBATIM
+    )
+    add_custom_target(anofox_ml_ffi_localize DEPENDS "${ANOFOX_ML_FFI_LOCAL_ARCHIVE}")
+    add_dependencies(anofox_ml_ffi_localize cargo-build_anofox_ml_ffi)
+
+    add_library(anofox_ml_ffi_local STATIC IMPORTED GLOBAL)
+    set_target_properties(anofox_ml_ffi_local PROPERTIES
+        IMPORTED_LOCATION "${ANOFOX_ML_FFI_LOCAL_ARCHIVE}"
+        INTERFACE_LINK_LIBRARIES "$<TARGET_PROPERTY:anofox_ml_ffi-static,INTERFACE_LINK_LIBRARIES>"
+    )
+    add_dependencies(anofox_ml_ffi_local anofox_ml_ffi_localize)
+    set(ANOFOX_ML_FFI_LIB anofox_ml_ffi_local)
+endif()
+
 # Link to Rust library
-target_link_libraries(${EXTENSION_NAME} anofox_ml_ffi-static)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} anofox_ml_ffi-static)
+target_link_libraries(${EXTENSION_NAME} ${ANOFOX_ML_FFI_LIB})
+target_link_libraries(${LOADABLE_EXTENSION_NAME} ${ANOFOX_ML_FFI_LIB})
 
 # Telemetry header is always needed (provides no-op stubs when telemetry is disabled)
 target_include_directories(${EXTENSION_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/posthog-telemetry/include)

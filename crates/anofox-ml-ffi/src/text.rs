@@ -1,12 +1,18 @@
-//! Stateless text features: scikit-learn's `HashingVectorizer` (signed
-//! murmur3 feature hashing of unigram tokens, optional L2 norm).
+//! Text features: the stateless `ml_hashing_vectorize` (scikit-learn's
+//! `HashingVectorizer`: signed murmur3 feature hashing of unigram tokens,
+//! optional L2 norm), and the registry's text kinds (`CountVectorizer`,
+//! `TfidfVectorizer`, `HashingVectorizer`) fitted on documents
+//! (`fit_text`) and applied with `transform_text`.
 
 use std::ffi::c_char;
 
 use anofox_ml_text::HashingVectorizer;
 use serde::Deserialize;
 
-use crate::{err, str_arg, AnofoxMlDoubles};
+use crate::{
+    encode_fitted, err, flatten, make_model, require_method, run_fit, str_arg, strings, with_model,
+    AnofoxMlBytes, AnofoxMlDoubles, POOL,
+};
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +105,93 @@ pub unsafe extern "C" fn anofox_ml_hashing_vectorize(
         }
         Ok(Err(e)) => err(e),
         Err(_) => err("internal error (panic) while hashing"),
+    }
+}
+
+/// Fit a text kind on `n_docs` documents (`fit_text`) and return the model
+/// BLOB in `out`.
+///
+/// # Safety
+/// `kind` / `params` are NUL-terminated strings (`params` may be NULL);
+/// `docs` holds `n_docs` NUL-terminated strings; `out` is writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_fit_text(
+    kind: *const c_char,
+    params: *const c_char,
+    docs: *const *const c_char,
+    n_docs: usize,
+    threads: usize,
+    out: *mut AnofoxMlBytes,
+) -> *mut c_char {
+    let run = || -> Result<Vec<u8>, String> {
+        let kind = str_arg(kind, "kind")?;
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let docs = strings(docs, n_docs, "document")?;
+        if docs.is_empty() {
+            return Err("no documents".into());
+        }
+        let mut model = make_model(kind, params)?;
+        require_method(kind, model.as_ref(), "fit_text")?;
+        run_fit(threads, || model.fit_text(&docs))?.map_err(|e| e.to_string())?;
+        // One input column: the document.
+        encode_fitted(kind, model.as_ref(), 1, None, None)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            *out = AnofoxMlBytes {
+                data: b.as_mut_ptr(),
+                len: b.len(),
+            };
+            std::mem::forget(b);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while fitting"),
+    }
+}
+
+/// Encode `n_docs` documents with a fitted text kind (`transform_text`);
+/// `out` receives `n_docs * out_cols` doubles, row-major.
+///
+/// # Safety
+/// `model` holds `model_len` bytes, `docs` `n_docs` NUL-terminated strings;
+/// `out` / `out_cols` are writable.
+#[no_mangle]
+pub unsafe extern "C" fn anofox_ml_transform_text(
+    model: *const u8,
+    model_len: usize,
+    docs: *const *const c_char,
+    n_docs: usize,
+    out: *mut AnofoxMlDoubles,
+    out_cols: *mut usize,
+) -> *mut c_char {
+    let run = || -> Result<(Vec<f64>, usize), String> {
+        if model.is_null() {
+            return Err("model is NULL".into());
+        }
+        let blob = std::slice::from_raw_parts(model, model_len);
+        let docs = strings(docs, n_docs, "document")?;
+        with_model(blob, |meta, model| {
+            require_method(&meta.kind, model, "transform_text")?;
+            let out = POOL
+                .with(|p| p.install(|| model.transform_text(&docs)))
+                .map_err(|e| e.to_string())?;
+            Ok(flatten(out))
+        })
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok((v, cols))) => {
+            *out = crate::into_doubles(v);
+            *out_cols = cols;
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(_) => err("internal error (panic) while encoding documents"),
     }
 }
 

@@ -264,6 +264,8 @@ SELECT ml_predict(m, list_concat(ml_transform(e, [city, channel]), [price, promo
 |---|---|
 | `ml_hashing_vectorize(text, n_features [, options])` | scikit-learn's `HashingVectorizer`: unigram tokens (2+ word characters) hashed into `n_features` buckets, as a dense `DOUBLE[]` to feed estimators directly. Options: `alternate_sign` (true), `norm` (`"l2"` or `null` for counts) |
 | `ml_hashing_vectorize_sparse(text, n_features [, options])` | The same as `STRUCT(indices INTEGER[], values DOUBLE[])`, buckets 0-based, for large `n_features` |
+| `ml_fit_agg(kind, text [, params])` | Aggregate: fit a text vectorizer on the group's documents (one `VARCHAR` per row; NULL rows are skipped): `CountVectorizer`, `TfidfVectorizer` (options `min_df`, `max_df_frac`, `norm_l2`) or `HashingVectorizer` (`n_features`, `alternate_sign`, `norm_l2`). The vocabulary (sorted, as scikit-learn's `get_feature_names_out`) and `idf` are in `ml_model_fitted` |
+| `ml_transform(model, text)` | Encode a document with a fitted text vectorizer: a dense `DOUBLE[]`, one entry per vocabulary word (words outside the vocabulary are ignored). Matches scikit-learn 1.8 on the default analyzer (lowercase, tokens of 2+ word characters) |
 
 ```sql
 CREATE TABLE spam_model AS
@@ -271,7 +273,15 @@ SELECT ml_fit_agg('MultinomialNB', label, ml_hashing_vectorize(body, 1024, '{"al
 SELECT ml_predict_label(model, ml_hashing_vectorize(body, 1024, '{"alternate_sign": false}')) FROM new_mails, spam_model;
 ```
 
-For TF-IDF, hash raw counts (`"norm": null`) and fit a `TfidfTransformer` on them. This gives scikit-learn's `HashingVectorizer` + `TfidfTransformer` exactly:
+For TF-IDF over a vocabulary, fit a `TfidfVectorizer` on the documents. The output is dense, one column per word, so keep the vocabulary small with `min_df` / `max_df_frac` on large corpora:
+
+```sql
+CREATE TABLE tfidf AS SELECT ml_fit_agg('TfidfVectorizer', body, '{"min_df": 5}') AS vec FROM mails;
+CREATE TABLE clf AS SELECT vec, ml_fit_agg('LinearSvc', label, ml_transform(vec, body)) AS model FROM mails, tfidf GROUP BY vec;
+SELECT ml_predict_label(model, ml_transform(vec, body)) FROM new_mails, clf;
+```
+
+Without a vocabulary (any corpus size), hash raw counts (`"norm": null`) and fit a `TfidfTransformer` on them. This gives scikit-learn's `HashingVectorizer` + `TfidfTransformer` exactly:
 
 ```sql
 CREATE MACRO counts(t) AS ml_hashing_vectorize(t, 4096, '{"alternate_sign": false, "norm": null}');

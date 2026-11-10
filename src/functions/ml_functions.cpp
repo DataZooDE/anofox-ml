@@ -138,6 +138,7 @@ void EstimatorsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 //===--------------------------------------------------------------------===//
 // ml_fit_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB
 // ml_fit_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BLOB (unsupervised)
+// ml_fit_agg(kind VARCHAR, text VARCHAR [, params VARCHAR]) -> BLOB (text vectorizers)
 //===--------------------------------------------------------------------===//
 struct FitState {
     bool initialized;
@@ -155,6 +156,7 @@ struct FitState {
     bool has_labels;
     std::vector<std::string> *sx; // VARCHAR features of an encoder (string_x)
     bool string_x;
+    bool text_x; // sx holds one document per row (fit_text)
     std::string *options; // ml_tune_agg options
     std::vector<uint8_t> *val; // per used row: 1 = validation row (ml_fit_with_validation_agg)
     std::vector<double> *off;  // per used row: offset on the link scale (ml_fit_with_offset_agg)
@@ -179,6 +181,7 @@ void FitInitialize(FitState &s) {
     s.has_labels = false;
     s.sx = new std::vector<std::string>();
     s.string_x = false;
+    s.text_x = false;
     s.options = new std::string();
     s.used = new std::vector<uint8_t>();
     s.val = new std::vector<uint8_t>();
@@ -408,6 +411,47 @@ void EncodeUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, 
     }
 }
 
+// ml_fit_agg(kind VARCHAR, text VARCHAR [, params VARCHAR]) for the text
+// vectorizers: one document per row; rows with a NULL text are skipped.
+void TextUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
+    UnifiedVectorFormat kind_data, text_data, params_data, sdata;
+    inputs[0].ToUnifiedFormat(count, kind_data);
+    inputs[1].ToUnifiedFormat(count, text_data);
+    const bool has_params = input_count > 2;
+    if (has_params) {
+        inputs[2].ToUnifiedFormat(count, params_data);
+    }
+    state_vector.ToUnifiedFormat(count, sdata);
+    auto kinds = UnifiedVectorFormat::GetData<string_t>(kind_data);
+    auto texts = UnifiedVectorFormat::GetData<string_t>(text_data);
+    auto states = UnifiedVectorFormat::GetData<FitState *>(sdata);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[sdata.sel->get_index(i)];
+        auto ki = kind_data.sel->get_index(i);
+        auto ti = text_data.sel->get_index(i);
+        if (!kind_data.validity.RowIsValid(ki) || !text_data.validity.RowIsValid(ti)) {
+            s.used->push_back(0);
+            continue;
+        }
+        if (!s.initialized) {
+            s.initialized = true;
+            s.text_x = true;
+            *s.kind = kinds[ki].GetString();
+            if (has_params) {
+                auto pi = params_data.sel->get_index(i);
+                if (params_data.validity.RowIsValid(pi)) {
+                    *s.params = UnifiedVectorFormat::GetData<string_t>(params_data)[pi].GetString();
+                }
+            }
+            s.n_cols = 1;
+        }
+        s.sx->push_back(texts[ti].GetString());
+        s.n_rows++;
+        s.used->push_back(1);
+        CheckFitSize(aggr, s.sx->size());
+    }
+}
+
 void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData &aggr, idx_t count) {
     auto sources = FlatVector::GetData<FitState *>(source_vector);
     auto targets = FlatVector::GetData<FitState *>(target_vector);
@@ -424,6 +468,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
             tgt.has_w = src.has_w;
             tgt.has_labels = src.has_labels;
             tgt.string_x = src.string_x;
+            tgt.text_x = src.text_x;
             *tgt.options = *src.options;
             *tgt.kind = *src.kind;
             *tgt.params = *src.params;
@@ -456,7 +501,16 @@ void FitFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &resu
         CaptureUse("ml_fit_agg");
         AnofoxMlBytes blob {nullptr, 0};
         const double *w = s.has_w ? s.w->data() : nullptr;
-        if (s.string_x) {
+        if (s.text_x) {
+            std::vector<const char *> docs;
+            docs.reserve(s.sx->size());
+            for (const auto &v : *s.sx) {
+                docs.push_back(v.c_str());
+            }
+            Check(anofox_ml_fit_text(s.kind->c_str(), s.params->c_str(), docs.data(), s.n_rows, FitThreads(aggr),
+                                     &blob),
+                  "ml_fit_agg");
+        } else if (s.string_x) {
             std::vector<const char *> x;
             x.reserve(s.sx->size());
             for (const auto &v : *s.sx) {
@@ -1330,6 +1384,76 @@ void MlEncodeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 }
 
 //===--------------------------------------------------------------------===//
+// ml_transform(model BLOB, text VARCHAR) -> DOUBLE[] (text vectorizers)
+//===--------------------------------------------------------------------===//
+void MlTransformTextFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    idx_t count = args.size();
+    UnifiedVectorFormat model_data, text_data;
+    args.data[0].ToUnifiedFormat(count, model_data);
+    args.data[1].ToUnifiedFormat(count, text_data);
+    auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
+    auto texts = UnifiedVectorFormat::GetData<string_t>(text_data);
+    result.SetVectorType(VectorType::FLAT_VECTOR);
+    CaptureUse("ml_transform");
+
+    // Consecutive rows with the same model are encoded in one call.
+    std::vector<std::pair<idx_t, std::vector<double>>> rows_out;
+    std::vector<idx_t> rows;
+    std::vector<std::string> docs;
+    string_t current;
+    auto flush = [&]() {
+        if (rows.empty()) {
+            return;
+        }
+        std::vector<const char *> ptrs;
+        for (const auto &d : docs) {
+            ptrs.push_back(d.c_str());
+        }
+        AnofoxMlDoubles out {nullptr, 0};
+        size_t out_cols = 0;
+        Check(anofox_ml_transform_text(reinterpret_cast<const uint8_t *>(current.GetData()), current.GetSize(),
+                                       ptrs.data(), rows.size(), &out, &out_cols),
+              "ml_transform");
+        for (idx_t r = 0; r < rows.size(); r++) {
+            rows_out.emplace_back(rows[r], std::vector<double>(out.data + r * out_cols, out.data + (r + 1) * out_cols));
+        }
+        anofox_ml_free_doubles(out);
+        rows.clear();
+        docs.clear();
+    };
+    for (idx_t i = 0; i < count; i++) {
+        auto mi = model_data.sel->get_index(i);
+        auto ti = text_data.sel->get_index(i);
+        if (!model_data.validity.RowIsValid(mi) || !text_data.validity.RowIsValid(ti)) {
+            FlatVector::SetNull(result, i, true);
+            continue;
+        }
+        const auto &model = models[mi];
+        bool same = !rows.empty() && model.GetSize() == current.GetSize() &&
+                    memcmp(model.GetData(), current.GetData(), model.GetSize()) == 0;
+        if (!same) {
+            flush();
+            current = model;
+        }
+        docs.push_back(texts[ti].GetString());
+        rows.push_back(i);
+    }
+    flush();
+    auto entries = compat::FlatData<list_entry_t>(result);
+    idx_t offset = ListVector::GetListSize(result);
+    for (auto &r : rows_out) {
+        entries[r.first] = list_entry_t(offset, r.second.size());
+        for (double d : r.second) {
+            ListVector::PushBack(result, Value::DOUBLE(d));
+        }
+        offset += r.second.size();
+    }
+    if (args.AllConstant()) {
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_predict(model BLOB, x DOUBLE[]) -> DOUBLE
 //===--------------------------------------------------------------------===//
 void MlPredictFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -1784,6 +1908,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         Fallible(ScalarFunction(model_and_x, LogicalType::LIST(DL), MakeListFunction("ml_transform", "transform"))));
     transform_set.AddFunction(
         Fallible(ScalarFunction({BL, LogicalType::LIST(VL)}, LogicalType::LIST(DL), MlEncodeFunction)));
+    transform_set.AddFunction(Fallible(ScalarFunction({BL, VL}, LogicalType::LIST(DL), MlTransformTextFunction)));
     loader.RegisterFunction(transform_set);
     loader.RegisterFunction(TableFunction("ml_estimators", {}, EstimatorsFunction, EstimatorsBind, EstimatorsInit));
 
@@ -1846,6 +1971,9 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const auto string_features = LogicalType::LIST(V);
     fit_set.AddFunction(make_fit({V, string_features}, EncodeUpdate));
     fit_set.AddFunction(make_fit({V, string_features, V}, EncodeUpdate));
+    // Text vectorizers: one VARCHAR document per row.
+    fit_set.AddFunction(make_fit({V, V}, TextUpdate));
+    fit_set.AddFunction(make_fit({V, V, V}, TextUpdate));
     loader.RegisterFunction(fit_set);
 
     AggregateFunctionSet validation_set("ml_fit_with_validation_agg");

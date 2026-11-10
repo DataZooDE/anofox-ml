@@ -1,21 +1,20 @@
 // One-shot table macros (ml_fit_predict_by, ml_cluster_by, ...): plain SQL over
-// the aggregates, parsed and registered at load time.
+// the aggregates, parsed as CREATE MACRO statements at load time.
 //
 // Column arguments (group_col, id_col, y_col, x_cols) are substituted as
 // expressions, so they are referenced unqualified; the macros' own columns
 // start with '_' to stay unambiguous. GROUP BY ALL keeps a constant group
-// expression from being read as a column position.
+// expression from being read as a column position; lists are unnested outside
+// the grouping query (DuckDB 2.0's GROUP BY ALL would group on the unnest).
 
 #include "duckdb.hpp"
-#include "duckdb/catalog/default/default_functions.hpp"
-#include "duckdb/function/table_macro_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
 
 #include "../include/anofox_ml_extension.hpp"
+#include "../include/duckdb_compat.hpp"
 
 namespace duckdb {
 
@@ -31,9 +30,10 @@ struct TableMacro {
 // Per-row aggregate results joined back to the source rows by (group, id).
 #define ML_ROWS_BY(AGG, COLUMN)                                                                                        \
     "WITH _src AS (FROM query_table(source::VARCHAR)),\n"                                                              \
-    "_l AS (SELECT group_col AS _g, unnest(list(id_col ORDER BY id_col)) AS _id,\n"                                    \
-    "              unnest(" AGG "(kind, x_cols, params ORDER BY id_col)) AS _v\n"                                      \
-    "       FROM _src GROUP BY ALL)\n"                                                                                 \
+    "_a AS (SELECT group_col AS _g, list(id_col ORDER BY id_col) AS _ids,\n"                                           \
+    "              " AGG "(kind, x_cols, params ORDER BY id_col) AS _vs\n"                                             \
+    "       FROM _src GROUP BY ALL),\n"                                                                                \
+    "_l AS (SELECT _g, unnest(_ids) AS _id, unnest(_vs) AS _v FROM _a)\n"                                              \
     "SELECT _src.*, _l._v AS " COLUMN "\n"                                                                             \
     "FROM _src LEFT JOIN _l ON group_col IS NOT DISTINCT FROM _l._g AND id_col = _l._id"
 
@@ -57,8 +57,9 @@ FROM _src LEFT JOIN _m ON group_col IS NOT DISTINCT FROM _m._g
 
 const char *kCrossValPredict = R"(
 WITH _src AS (FROM query_table(source::VARCHAR) WHERE y_col IS NOT NULL),
-_f AS (SELECT group_col AS _g, unnest(ml_cv_splits_agg(id_col, method, options, y_col ORDER BY id_col)) AS _s
+_a AS (SELECT group_col AS _g, ml_cv_splits_agg(id_col, method, options, y_col ORDER BY id_col) AS _splits
        FROM _src GROUP BY ALL),
+_f AS (SELECT _g, unnest(_splits) AS _s FROM _a),
 _d AS (SELECT _src.*, _f._g, _f._s.split AS _split, _f._s.role AS _role
        FROM _src JOIN _f ON group_col IS NOT DISTINCT FROM _f._g AND id_col = _f._s.id),
 _m AS (SELECT _g, _split, ml_fit_agg(kind, y_col, x_cols, params) AS _model
@@ -140,53 +141,54 @@ const TableMacro kMacros[] = {
      kDle},
 };
 
-unique_ptr<CreateMacroInfo> MakeTableMacro(const TableMacro &def) {
-    Parser parser;
-    parser.ParseQuery(def.sql);
-    if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
-        throw InternalException("%s: expected a single SELECT", def.name);
+// Register `CREATE MACRO <name><definition>` as an internal, temporary macro
+// of the main schema; the parser handles parameters and defaults.
+void RegisterMacro(ExtensionLoader &loader, const string &name, const string &definition) {
+    auto parser = compat::MakeParser();
+    parser.ParseQuery("CREATE MACRO " + name + definition);
+    if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
+        throw InternalException("%s: expected a single CREATE MACRO", name);
     }
-    auto function = make_uniq<TableMacroFunction>(std::move(parser.statements[0]->Cast<SelectStatement>().node));
+    auto &info = parser.statements[0]->Cast<CreateStatement>().info->Cast<CreateMacroInfo>();
+    info.SetSchema(DEFAULT_SCHEMA);
+    info.temporary = true;
+    info.internal = true;
+    loader.RegisterFunction(info);
+}
+
+// "(p1, ..., n1 := d1, ...) AS TABLE <sql>"
+string TableMacroDefinition(const TableMacro &def) {
+    string params;
     for (auto p : def.parameters) {
-        function->parameters.push_back(make_uniq<ColumnRefExpression>(p));
+        params += string(params.empty() ? "" : ", ") + p;
     }
     for (const auto &p : def.named) {
-        function->parameters.push_back(make_uniq<ColumnRefExpression>(p.first));
-        auto defaults = Parser::ParseExpressionList(p.second);
-        function->default_parameters.insert(make_pair(string(p.first), std::move(defaults[0])));
+        params += string(params.empty() ? "" : ", ") + p.first + " := " + p.second;
     }
-    auto info = make_uniq<CreateMacroInfo>(CatalogType::TABLE_MACRO_ENTRY);
-    info->schema = DEFAULT_SCHEMA;
-    info->name = def.name;
-    info->temporary = true;
-    info->internal = true;
-    info->macros.push_back(std::move(function));
-    return info;
+    return "(" + params + ") AS TABLE " + def.sql;
 }
+
+// Scalar macros: name, "(parameters) AS expression". Set metrics aggregate
+// ml_predict_set's VARCHAR[]; a numeric y matches its label text as a number
+// ("1" for 1.0).
+const std::pair<const char *, const char *> kScalarMacros[] = {
+    {"ml_set_coverage",
+     "(y, prediction_set) AS avg(CASE WHEN y IS NULL OR prediction_set IS NULL THEN NULL "
+     "WHEN list_contains(prediction_set, y::VARCHAR) OR coalesce(list_contains(list_transform(prediction_set, "
+     "lambda _e: TRY_CAST(_e AS DOUBLE)), TRY_CAST(y AS DOUBLE)), false) THEN 1.0 ELSE 0.0 END)"},
+    {"ml_mean_set_size", "(prediction_set) AS avg(len(prediction_set))"},
+    // Squared Mahalanobis distance to a fitted covariance estimator.
+    {"ml_mahalanobis", "(model, x) AS ml_transform(model, x)[1]"},
+};
 
 } // anonymous namespace
 
-// Scalar macros. Set metrics aggregate ml_predict_set's VARCHAR[]; a numeric
-// y matches its label text as a number ("1" for 1.0).
-const DefaultMacro kScalarMacros[] = {
-    {DEFAULT_SCHEMA,
-     "ml_set_coverage",
-     {"y", "prediction_set", nullptr},
-     {{nullptr, nullptr}},
-     "avg(CASE WHEN y IS NULL OR prediction_set IS NULL THEN NULL "
-     "WHEN list_contains(prediction_set, y::VARCHAR) OR coalesce(list_contains(list_transform(prediction_set, "
-     "_e -> TRY_CAST(_e AS DOUBLE)), TRY_CAST(y AS DOUBLE)), false) THEN 1.0 ELSE 0.0 END)"},
-    {DEFAULT_SCHEMA, "ml_mean_set_size", {"prediction_set", nullptr}, {{nullptr, nullptr}}, "avg(len(prediction_set))"},
-    // Squared Mahalanobis distance to a fitted covariance estimator.
-    {DEFAULT_SCHEMA, "ml_mahalanobis", {"model", "x", nullptr}, {{nullptr, nullptr}}, "ml_transform(model, x)[1]"},
-};
-
 void RegisterMlMacros(ExtensionLoader &loader) {
     for (const auto &def : kScalarMacros) {
-        loader.RegisterFunction(*DefaultFunctionGenerator::CreateInternalMacroInfo(def));
+        RegisterMacro(loader, def.first, def.second);
     }
     for (const auto &def : kMacros) {
-        loader.RegisterFunction(*MakeTableMacro(def));
+        RegisterMacro(loader, def.name, TableMacroDefinition(def));
     }
 }
 

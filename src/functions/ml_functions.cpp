@@ -15,6 +15,7 @@
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
+#include "../include/duckdb_compat.hpp"
 #include "telemetry.hpp"
 
 namespace duckdb {
@@ -83,7 +84,7 @@ struct EstimatorsState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> EstimatorsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
-                                        vector<string> &names) {
+                                        compat::ColumnNames &names) {
     names = {"kind", "default_params", "capabilities"};
     types = {LogicalType(LogicalTypeId::VARCHAR), LogicalType(LogicalTypeId::VARCHAR),
              LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR))};
@@ -161,8 +162,7 @@ struct FitState {
     std::vector<uint8_t> *used;
 };
 
-void FitInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<FitState *>(state_p);
+void FitInitialize(FitState &s) {
     s.initialized = false;
     s.kind = new std::string();
     s.params = new std::string();
@@ -220,7 +220,7 @@ struct FitBindData : public FunctionData {
     }
 };
 
-unique_ptr<FunctionData> FitBind(ClientContext &context, AggregateFunction &, vector<unique_ptr<Expression>> &) {
+unique_ptr<FunctionData> FitBind(ClientContext &context, optional_ptr<AggregateFunctionInfo>) {
     Value v;
     uint64_t max_values = 100000000;
     if (context.TryGetCurrentSetting("anofox_ml_max_fit_values", v) && !v.IsNull()) {
@@ -282,11 +282,11 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
 
     auto kinds = UnifiedVectorFormat::GetData<string_t>(kind_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(inputs[X]);
+    auto &child = compat::ListChild(inputs[X]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(inputs[X]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
-    auto states = reinterpret_cast<FitState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<FitState *>(sdata);
 
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
@@ -361,11 +361,11 @@ void EncodeUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, 
     state_vector.ToUnifiedFormat(count, sdata);
     auto kinds = UnifiedVectorFormat::GetData<string_t>(kind_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(inputs[1]);
+    auto &child = compat::ListChild(inputs[1]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
     auto values = UnifiedVectorFormat::GetData<string_t>(child_data);
-    auto states = reinterpret_cast<FitState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<FitState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto ki = kind_data.sel->get_index(i);
@@ -436,7 +436,7 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
     }
 }
 
-void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void FitFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
@@ -470,7 +470,7 @@ void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
                                 s.has_y ? s.y->data() : nullptr, w, FitThreads(aggr), &blob),
                   "ml_fit_agg");
         }
-        FlatVector::GetData<string_t>(result)[row] =
+        compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
     }
@@ -481,7 +481,7 @@ void FitFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
 //                            [, params VARCHAR [, weight DOUBLE]]) -> BLOB
 // Rows with is_validation = true are the validation set of early stopping.
 //===--------------------------------------------------------------------===//
-void FitValidationFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count,
+void FitValidationFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count,
                            idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
@@ -501,7 +501,7 @@ void FitValidationFinalize(Vector &state_vector, AggregateInputData &aggr, Vecto
                                        s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
                                        s.has_w ? s.w->data() : nullptr, s.val->data(), FitThreads(aggr), &blob),
               "ml_fit_with_validation_agg");
-        FlatVector::GetData<string_t>(result)[row] =
+        compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
     }
@@ -521,7 +521,7 @@ void TuneUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Ve
     UnifiedVectorFormat options_data, sdata;
     inputs[4].ToUnifiedFormat(count, options_data);
     state_vector.ToUnifiedFormat(count, sdata);
-    auto states = reinterpret_cast<FitState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<FitState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto oi = options_data.sel->get_index(i);
@@ -540,9 +540,11 @@ LogicalType TuneType() {
     return LogicalType::STRUCT(std::move(fields));
 }
 
-void TuneFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void TuneFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
-    auto &fields = StructVector::GetEntries(result);
+    auto &best_params = compat::StructField(result, 0);
+    auto &model = compat::StructField(result, 2);
+    auto &trials = compat::StructField(result, 3);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -560,11 +562,11 @@ void TuneFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result
                              s.n_cols, s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
                              FitThreads(aggr), &r),
               "ml_tune_agg");
-        FlatVector::GetData<string_t>(*fields[0])[row] = StringVector::AddString(*fields[0], r.best_params);
-        FlatVector::GetData<double>(*fields[1])[row] = r.best_score;
-        FlatVector::GetData<string_t>(*fields[2])[row] =
-            StringVector::AddStringOrBlob(*fields[2], reinterpret_cast<const char *>(r.model.data), r.model.len);
-        FlatVector::GetData<string_t>(*fields[3])[row] = StringVector::AddString(*fields[3], r.trials);
+        compat::FlatData<string_t>(best_params)[row] = StringVector::AddString(best_params, r.best_params);
+        compat::FlatData<double>(compat::StructField(result, 1))[row] = r.best_score;
+        compat::FlatData<string_t>(model)[row] =
+            StringVector::AddStringOrBlob(model, reinterpret_cast<const char *>(r.model.data), r.model.len);
+        compat::FlatData<string_t>(trials)[row] = StringVector::AddString(trials, r.trials);
         anofox_ml_free_tune_result(r);
     }
 }
@@ -591,7 +593,7 @@ LogicalType RfeType() {
     return LogicalType::STRUCT(std::move(fields));
 }
 
-void RfeFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void RfeFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
@@ -631,9 +633,9 @@ void RfeFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result,
 // ORDER BY inside the aggregate to fix it); skipped rows get NULL.
 //===--------------------------------------------------------------------===//
 template <const char *FUNCTION, const char *METHODS, class T>
-void RowsFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void RowsFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<FitState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -656,9 +658,9 @@ void RowsFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result
         idx_t list_offset = ListVector::GetListSize(result);
         idx_t n = s.used->size();
         ListVector::Reserve(result, list_offset + n);
-        auto &child = ListVector::GetEntry(result);
-        auto child_data = FlatVector::GetData<T>(child);
-        auto &child_validity = FlatVector::Validity(child);
+        auto &child = compat::ListChild(result);
+        auto child_data = compat::FlatData<T>(child);
+        auto &child_validity = compat::FlatValidity(child);
         idx_t next = 0;
         for (idx_t r = 0; r < n; r++) {
             if ((*s.used)[r]) {
@@ -679,10 +681,11 @@ void RowsFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result
 // embedding (t-SNE, Isomap, LLE, MDS; TargetEncoder's cross-fitted encoding)
 // or else `transform` of the training rows. Row order as in RowsFinalize.
 //===--------------------------------------------------------------------===//
-void FitTransformFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void FitTransformFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count,
+                          idx_t offset) {
     static constexpr const char *FUNCTION = "ml_fit_transform_agg";
     auto states = FlatVector::GetData<FitState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -701,12 +704,12 @@ void FitTransformFinalize(Vector &state_vector, AggregateInputData &aggr, Vector
         idx_t n = s.used->size();
         idx_t outer_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, outer_offset + n);
-        auto &rows = ListVector::GetEntry(result);
-        auto row_entries = FlatVector::GetData<list_entry_t>(rows);
-        auto &row_validity = FlatVector::Validity(rows);
+        auto &rows = compat::ListChild(result);
+        auto row_entries = compat::FlatData<list_entry_t>(rows);
+        auto &row_validity = compat::FlatValidity(rows);
         idx_t value_offset = ListVector::GetListSize(rows);
         ListVector::Reserve(rows, value_offset + s.n_rows * out_cols);
-        auto values = FlatVector::GetData<double>(ListVector::GetEntry(rows));
+        auto values = compat::FlatData<double>(compat::ListChild(rows));
         idx_t next = 0;
         for (idx_t r = 0; r < n; r++) {
             if ((*s.used)[r]) {
@@ -744,13 +747,13 @@ void ApplyBatchedWith(DataChunk &args, const char *function, Vector &result, CAL
     args.data[1].ToUnifiedFormat(count, x_data);
     auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(args.data[1]);
+    auto &child = compat::ListChild(args.data[1]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(args.data[1]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
 
     result.SetVectorType(VectorType::FLAT_VECTOR);
-    auto &validity = FlatVector::Validity(result);
+    auto &validity = compat::FlatValidity(result);
     CaptureUse(function);
 
     std::vector<idx_t> rows;
@@ -815,7 +818,7 @@ void ApplyBatched(DataChunk &args, const char *function, const char *method, Vec
 // ml_predict_label(model BLOB, x DOUBLE[]) -> VARCHAR (string class label)
 //===--------------------------------------------------------------------===//
 void MlPredictLabelFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    auto out = FlatVector::GetData<string_t>(result);
+    auto out = compat::FlatData<string_t>(result);
     ApplyBatchedWith(args, "ml_predict_label", result,
                      [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
                          AnofoxMlStrings labels {nullptr, 0};
@@ -877,9 +880,8 @@ LogicalType IntervalType() {
 }
 
 void MlPredictIntervalFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    auto &fields = StructVector::GetEntries(result);
-    auto lower = FlatVector::GetData<double>(*fields[0]);
-    auto upper = FlatVector::GetData<double>(*fields[1]);
+    auto lower = compat::FlatData<double>(compat::StructField(result, 0));
+    auto upper = compat::FlatData<double>(compat::StructField(result, 1));
     ApplyBatchedWith(
         args, "ml_predict_interval", result,
         [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
@@ -921,7 +923,7 @@ void MlPredictSetFunction(DataChunk &args, ExpressionState &state, Vector &resul
                 anofox_ml_free_doubles(lengths);
             });
         });
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     idx_t offset = ListVector::GetListSize(result);
     for (auto &row : sets) {
         entries[row.first] = list_entry_t(offset, row.second.size());
@@ -948,8 +950,7 @@ struct ConformalState {
     idx_t n_cols;
 };
 
-void ConformalInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<ConformalState *>(state_p);
+void ConformalInitialize(ConformalState &s) {
     s.model = new std::string();
     s.options = new std::string();
     s.x = new std::vector<double>();
@@ -987,11 +988,11 @@ void ConformalUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, V
     state_vector.ToUnifiedFormat(count, sdata);
     auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(inputs[2]);
+    auto &child = compat::ListChild(inputs[2]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
-    auto states = reinterpret_cast<ConformalState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<ConformalState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto mi = model_data.sel->get_index(i);
@@ -1059,7 +1060,7 @@ void ConformalCombine(Vector &source_vector, Vector &target_vector, AggregateInp
 // ml_warm_start_agg(model BLOB, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR]) -> BLOB
 // Continue training a boosting model on the group's rows.
 //===--------------------------------------------------------------------===//
-void WarmStartFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &result, idx_t count, idx_t offset) {
+void WarmStartFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<ConformalState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
@@ -1080,13 +1081,13 @@ void WarmStartFinalize(Vector &state_vector, AggregateInputData &aggr, Vector &r
                                    has_labels ? nullptr : s.y->data(), has_labels ? labels.data() : nullptr,
                                    FitThreads(aggr), &blob),
               "ml_warm_start_agg");
-        FlatVector::GetData<string_t>(result)[row] =
+        compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
     }
 }
 
-void ConformalFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void ConformalFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<ConformalState *>(state_vector);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
@@ -1110,15 +1111,15 @@ void ConformalFinalize(Vector &state_vector, AggregateInputData &, Vector &resul
             Check(anofox_ml_conformalize(model, s.model->size(), s.x->data(), s.n_rows, s.n_cols, s.y->data(), &blob),
                   "ml_conformalize_agg");
         }
-        FlatVector::GetData<string_t>(result)[row] =
+        compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
     }
 }
 
-void ImportanceFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void ImportanceFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<ConformalState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -1139,10 +1140,10 @@ void ImportanceFinalize(Vector &state_vector, AggregateInputData &, Vector &resu
               "ml_permutation_importance_agg");
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + s.n_cols);
-        auto &fields = StructVector::GetEntries(ListVector::GetEntry(result));
-        auto feature = FlatVector::GetData<int32_t>(*fields[0]);
-        auto mean = FlatVector::GetData<double>(*fields[1]);
-        auto stddev = FlatVector::GetData<double>(*fields[2]);
+        auto &structs = compat::ListChild(result);
+        auto feature = compat::FlatData<int32_t>(compat::StructField(structs, 0));
+        auto mean = compat::FlatData<double>(compat::StructField(structs, 1));
+        auto stddev = compat::FlatData<double>(compat::StructField(structs, 2));
         for (idx_t j = 0; j < s.n_cols; j++) {
             feature[list_offset + j] = static_cast<int32_t>(j + 1); // 1-based, as x[feature]
             mean[list_offset + j] = out.data[2 * j];
@@ -1164,7 +1165,7 @@ void MlEncodeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     args.data[1].ToUnifiedFormat(count, x_data);
     auto models = UnifiedVectorFormat::GetData<string_t>(model_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
-    auto &child = ListVector::GetEntry(args.data[1]);
+    auto &child = compat::ListChild(args.data[1]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(args.data[1]), child_data);
     auto values = UnifiedVectorFormat::GetData<string_t>(child_data);
@@ -1219,7 +1220,7 @@ void MlEncodeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
         rows.push_back(i);
     }
     flush();
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     idx_t offset = ListVector::GetListSize(result);
     for (auto &r : rows_out) {
         entries[r.first] = list_entry_t(offset, r.second.size());
@@ -1237,7 +1238,7 @@ void MlEncodeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 // ml_predict(model BLOB, x DOUBLE[]) -> DOUBLE
 //===--------------------------------------------------------------------===//
 void MlPredictFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-    auto out = FlatVector::GetData<double>(result);
+    auto out = compat::FlatData<double>(result);
     ApplyBatched(args, "ml_predict", "predict", result, [&](idx_t row, const double *v, size_t n) {
         if (n != 1) {
             throw InvalidInputException("ml_predict: the model returns %llu values per row; use ml_transform",
@@ -1258,7 +1259,7 @@ scalar_function_t MakeListFunction(const char *function, const char *method) {
         ApplyBatched(args, function, method, result, [&](idx_t row, const double *v, size_t n) {
             rows.emplace_back(row, std::vector<double>(v, v + n));
         });
-        auto entries = FlatVector::GetData<list_entry_t>(result);
+        auto entries = compat::FlatData<list_entry_t>(result);
         idx_t offset = ListVector::GetListSize(result);
         for (auto &r : rows) {
             entries[r.first] = list_entry_t(offset, r.second.size());
@@ -1504,40 +1505,38 @@ void MlModelInfoFunction(DataChunk &args, ExpressionState &state, Vector &result
 
 void RegisterMlFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(ScalarFunction("ml_version", {}, LogicalType(LogicalTypeId::VARCHAR), MlVersionFunction));
-    loader.RegisterFunction(
-        ScalarFunction("ml_model_kind", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelKindFunction));
-    loader.RegisterFunction(
-        ScalarFunction("ml_model_info", {LogicalType(LogicalTypeId::BLOB)}, ModelInfoType(), MlModelInfoFunction));
     const auto BL = LogicalType(LogicalTypeId::BLOB), DL = LogicalType(LogicalTypeId::DOUBLE);
-    loader.RegisterFunction(ScalarFunction("ml_coefficients", {BL}, CoefficientsType(), MlCoefficientsFunction));
-    loader.RegisterFunction(ScalarFunction("ml_cluster_centers", {BL}, LogicalType::LIST(LogicalType::LIST(DL)),
-                                           MlClusterCentersFunction));
-    loader.RegisterFunction(ScalarFunction("ml_explained_variance_ratio", {BL}, LogicalType::LIST(DL),
-                                           MlExplainedVarianceRatioFunction));
+    const auto VL = LogicalType(LogicalTypeId::VARCHAR);
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_model_kind", {BL}, VL, MlModelKindFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_model_info", {BL}, ModelInfoType(), MlModelInfoFunction)));
     loader.RegisterFunction(
-        ScalarFunction("ml_feature_importances", {BL}, LogicalType::LIST(DL), MlFeatureImportancesFunction));
-    loader.RegisterFunction(ScalarFunction("ml_covariance", {BL}, CovarianceType(), MlCovarianceFunction));
+        Fallible(ScalarFunction("ml_coefficients", {BL}, CoefficientsType(), MlCoefficientsFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction(
+        "ml_cluster_centers", {BL}, LogicalType::LIST(LogicalType::LIST(DL)), MlClusterCentersFunction)));
+    loader.RegisterFunction(Fallible(
+        ScalarFunction("ml_explained_variance_ratio", {BL}, LogicalType::LIST(DL), MlExplainedVarianceRatioFunction)));
     loader.RegisterFunction(
-        ScalarFunction("ml_model_fitted", {LogicalType(LogicalTypeId::BLOB)}, LogicalType(LogicalTypeId::VARCHAR), MlModelFittedFunction));
-    const vector<LogicalType> model_and_x {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))};
-    loader.RegisterFunction(ScalarFunction("ml_predict", model_and_x, LogicalType(LogicalTypeId::DOUBLE), MlPredictFunction));
+        Fallible(ScalarFunction("ml_feature_importances", {BL}, LogicalType::LIST(DL), MlFeatureImportancesFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_covariance", {BL}, CovarianceType(), MlCovarianceFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_model_fitted", {BL}, VL, MlModelFittedFunction)));
+    const vector<LogicalType> model_and_x {BL, LogicalType::LIST(DL)};
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_predict", model_and_x, DL, MlPredictFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_predict_label", model_and_x, VL, MlPredictLabelFunction)));
+    const vector<LogicalType> model_x_alpha {BL, LogicalType::LIST(DL), DL};
     loader.RegisterFunction(
-        ScalarFunction("ml_predict_label", model_and_x, LogicalType(LogicalTypeId::VARCHAR), MlPredictLabelFunction));
-    const vector<LogicalType> model_x_alpha {LogicalType(LogicalTypeId::BLOB), LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
-                                             LogicalType(LogicalTypeId::DOUBLE)};
+        Fallible(ScalarFunction("ml_predict_interval", model_x_alpha, IntervalType(), MlPredictIntervalFunction)));
     loader.RegisterFunction(
-        ScalarFunction("ml_predict_interval", model_x_alpha, IntervalType(), MlPredictIntervalFunction));
-    loader.RegisterFunction(ScalarFunction("ml_predict_set", model_x_alpha, LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR)),
-                                           MlPredictSetFunction));
+        Fallible(ScalarFunction("ml_predict_set", model_x_alpha, LogicalType::LIST(VL), MlPredictSetFunction)));
     AggregateFunctionSet conformal_set("ml_conformalize_agg");
     for (bool labels : {false, true}) {
-        AggregateFunction f("ml_conformalize_agg",
-                            {LogicalType(LogicalTypeId::BLOB), LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
-                             LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))},
-                            LogicalType(LogicalTypeId::BLOB), AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
-                            labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine<>,
-                            ConformalFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
-                            ConformalDestroy);
+        AggregateFunction f(
+            "ml_conformalize_agg",
+            {LogicalType(LogicalTypeId::BLOB), LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
+             LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE))},
+            LogicalType(LogicalTypeId::BLOB), AggregateFunction::StateSize<ConformalState>,
+            compat::StateInit<ConformalInitialize>, labels ? ConformalUpdate<true> : ConformalUpdate<false>,
+            ConformalCombine<>, ConformalFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
+            ConformalDestroy);
         conformal_set.AddFunction(f);
     }
     loader.RegisterFunction(conformal_set);
@@ -1551,10 +1550,10 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                 args.push_back(LogicalType(LogicalTypeId::VARCHAR));
             }
             AggregateFunction f("ml_warm_start_agg", args, LogicalType(LogicalTypeId::BLOB),
-                                AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
+                                AggregateFunction::StateSize<ConformalState>, compat::StateInit<ConformalInitialize>,
                                 labels ? ConformalUpdate<true, kWarmStart> : ConformalUpdate<false, kWarmStart>,
                                 ConformalCombine<kWarmStart>, WarmStartFinalize, FunctionNullHandling::SPECIAL_HANDLING,
-                                nullptr, FitBind, ConformalDestroy);
+                                nullptr, compat::AggregateBind<FitBind>, ConformalDestroy);
             warm_set.AddFunction(f);
         }
     }
@@ -1575,7 +1574,7 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                 args.push_back(LogicalType(LogicalTypeId::VARCHAR));
             }
             AggregateFunction f("ml_permutation_importance_agg", args, importance_type,
-                                AggregateFunction::StateSize<ConformalState>, ConformalInitialize,
+                                AggregateFunction::StateSize<ConformalState>, compat::StateInit<ConformalInitialize>,
                                 labels ? ConformalUpdate<true> : ConformalUpdate<false>, ConformalCombine<>,
                                 ImportanceFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
                                 ConformalDestroy);
@@ -1589,23 +1588,23 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         {"ml_score_samples", "score_samples"}, {"ml_staged_predict", "staged_predict"},
     };
     for (const auto &f : list_functions) {
-        loader.RegisterFunction(ScalarFunction(f.first, model_and_x, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
-                                               MakeListFunction(f.first, f.second)));
+        loader.RegisterFunction(
+            Fallible(ScalarFunction(f.first, model_and_x, LogicalType::LIST(DL), MakeListFunction(f.first, f.second))));
     }
     ScalarFunctionSet transform_set("ml_transform");
-    transform_set.AddFunction(ScalarFunction(model_and_x, LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
-                                             MakeListFunction("ml_transform", "transform")));
-    transform_set.AddFunction(ScalarFunction({LogicalType(LogicalTypeId::BLOB),
-                                              LogicalType::LIST(LogicalType(LogicalTypeId::VARCHAR))},
-                                             LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)), MlEncodeFunction));
+    transform_set.AddFunction(
+        Fallible(ScalarFunction(model_and_x, LogicalType::LIST(DL), MakeListFunction("ml_transform", "transform"))));
+    transform_set.AddFunction(
+        Fallible(ScalarFunction({BL, LogicalType::LIST(VL)}, LogicalType::LIST(DL), MlEncodeFunction)));
     loader.RegisterFunction(transform_set);
     loader.RegisterFunction(TableFunction("ml_estimators", {}, EstimatorsFunction, EstimatorsBind, EstimatorsInit));
 
     AggregateFunctionSet fit_set("ml_fit_agg");
     auto make_fit = [](vector<LogicalType> args, aggregate_update_t update) {
-        AggregateFunction f("ml_fit_agg", std::move(args), LogicalType(LogicalTypeId::BLOB), AggregateFunction::StateSize<FitState>,
-                            FitInitialize, update, FitCombine, FitFinalize, nullptr, FitBind, FitDestroy);
-        f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+        AggregateFunction f("ml_fit_agg", std::move(args), LogicalType(LogicalTypeId::BLOB),
+                            AggregateFunction::StateSize<FitState>, compat::StateInit<FitInitialize>, update,
+                            FitCombine, FitFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+        f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
         return f;
     };
     const auto features = LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE));
@@ -1633,9 +1632,9 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                 args.push_back(V);
             }
             AggregateFunction f("ml_tune_agg", args, TuneType(), AggregateFunction::StateSize<FitState>,
-                                FitInitialize, labels ? TuneUpdate<true> : TuneUpdate<false>, FitCombine,
-                                TuneFinalize, nullptr, FitBind, FitDestroy);
-            f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+                                compat::StateInit<FitInitialize>, labels ? TuneUpdate<true> : TuneUpdate<false>,
+                                FitCombine, TuneFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+            f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
             tune_set.AddFunction(f);
         }
     }
@@ -1647,10 +1646,10 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
             for (idx_t e = 0; e < extra; e++) {
                 args.push_back(V); // params, options
             }
-            AggregateFunction f("ml_rfe_agg", args, RfeType(), AggregateFunction::StateSize<FitState>, FitInitialize,
-                                labels ? RfeUpdate<true> : RfeUpdate<false>, FitCombine, RfeFinalize, nullptr, FitBind,
-                                FitDestroy);
-            f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+            AggregateFunction f("ml_rfe_agg", args, RfeType(), AggregateFunction::StateSize<FitState>,
+                                compat::StateInit<FitInitialize>, labels ? RfeUpdate<true> : RfeUpdate<false>,
+                                FitCombine, RfeFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+            f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
             rfe_set.AddFunction(f);
         }
     }
@@ -1665,9 +1664,9 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const auto B = LogicalType(LogicalTypeId::BOOLEAN), D = LogicalType(LogicalTypeId::DOUBLE);
     auto make_validation = [](vector<LogicalType> args, aggregate_update_t update) {
         AggregateFunction f("ml_fit_with_validation_agg", std::move(args), LogicalType(LogicalTypeId::BLOB),
-                            AggregateFunction::StateSize<FitState>, FitInitialize, update, FitCombine,
-                            FitValidationFinalize, nullptr, FitBind, FitDestroy);
-        f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+                            AggregateFunction::StateSize<FitState>, compat::StateInit<FitInitialize>, update,
+                            FitCombine, FitValidationFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+        f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
         return f;
     };
     validation_set.AddFunction(make_validation({V, D, features, B}, FitUpdate<true, false, false, false, true>));
@@ -1683,9 +1682,10 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                          const vector<Overload> &overloads) {
         AggregateFunctionSet set(name);
         for (const auto &o : overloads) {
-            AggregateFunction f(name, o.first, result, AggregateFunction::StateSize<FitState>, FitInitialize,
-                                o.second, FitCombine, finalize, nullptr, FitBind, FitDestroy);
-            f.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+            AggregateFunction f(name, o.first, result, AggregateFunction::StateSize<FitState>,
+                                compat::StateInit<FitInitialize>, o.second, FitCombine, finalize, nullptr,
+                                compat::AggregateBind<FitBind>, FitDestroy);
+            f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
             set.AddFunction(f);
         }
         loader.RegisterFunction(set);

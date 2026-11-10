@@ -25,6 +25,19 @@ jobs:
       # anofox_ml needs 1.88 (perpetual): the wasm builds run in the job below.
       exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
 
+  # The same source against DuckDB 2.0 (src/include/duckdb_compat.hpp).
+  duckdb-2-build:
+    name: Build extension binaries (DuckDB 2.0)
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
+    with:
+      duckdb_version: v2.0.0
+      ci_tools_version: v2.0-cyanoptera
+      extension_name: anofox_ml
+      enable_rust: true
+      reduced_ci_mode: disabled
+      # The wasm builds don't link the Rust core yet (DataZooDE/anofox-ml#29).
+      exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
+
   # DuckDB-Wasm builds: extension-ci-tools' wasm job with a current Rust
   # toolchain instead of its pinned 1.86 (DataZooDE/anofox-ml#29).
   wasm:
@@ -138,7 +151,7 @@ jobs:
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [duckdb-stable-build, wasm, build-and-test-rust]
+    needs: [duckdb-stable-build, duckdb-2-build, wasm, build-and-test-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -147,7 +160,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: anofox_ml-v1.5.6-extension-*
+          pattern: anofox_ml-v*-extension-*
           path: artifacts
 
       # DuckDB derives the entry point from the file name, so each platform
@@ -157,10 +170,12 @@ jobs:
       - name: Collect binaries
         run: |
           mkdir dist
-          for dir in artifacts/anofox_ml-v1.5.6-extension-*; do
+          for dir in artifacts/anofox_ml-v*-extension-*; do
             arch="${dir##*-extension-}"
+            duckdb="${dir#artifacts/anofox_ml-}"
+            duckdb="${duckdb%%-extension-*}"
             case "$arch" in wasm_*) continue ;; esac
-            (cd "$dir" && zip -9 "$GITHUB_WORKSPACE/dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-v1.5.6-${arch}.zip" anofox_ml.duckdb_extension)
+            (cd "$dir" && zip -9 "$GITHUB_WORKSPACE/dist/anofox_ml-${GITHUB_REF_NAME}-duckdb-${duckdb}-${arch}.zip" anofox_ml.duckdb_extension)
           done
           (cd dist && sha256sum * > SHA256SUMS)
           ls -l dist

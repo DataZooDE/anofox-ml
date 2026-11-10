@@ -14,6 +14,7 @@
 
 #include "../include/anofox_ml_extension.hpp"
 #include "../include/anofox_ml_ffi.h"
+#include "../include/duckdb_compat.hpp"
 
 namespace duckdb {
 
@@ -33,8 +34,7 @@ struct CvState {
     bool has_groups;
 };
 
-void CvInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<CvState *>(state_p);
+void CvInitialize(CvState &s) {
     s.initialized = false;
     s.method = new std::string();
     s.options = new std::string();
@@ -86,7 +86,7 @@ void CvUpdate(Vector inputs[], AggregateInputData &, idx_t input_count, Vector &
         inputs[4].ToUnifiedFormat(count, group_data);
     }
     state_vector.ToUnifiedFormat(count, sdata);
-    auto states = reinterpret_cast<CvState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<CvState *>(sdata);
     auto ids = UnifiedVectorFormat::GetData<int64_t>(id_data);
 
     for (idx_t i = 0; i < count; i++) {
@@ -144,9 +144,9 @@ void CvCombine(Vector &source_vector, Vector &target_vector, AggregateInputData 
     }
 }
 
-void CvFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void CvFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<CvState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -180,11 +180,10 @@ void CvFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_
         }
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + splits.len);
-        auto &child = ListVector::GetEntry(result);
-        auto &fields = StructVector::GetEntries(child);
-        auto id_out = FlatVector::GetData<int64_t>(*fields[0]);
-        auto split_out = FlatVector::GetData<int32_t>(*fields[1]);
-        auto role_out = FlatVector::GetData<string_t>(*fields[2]);
+        auto &child = compat::ListChild(result);
+        auto id_out = compat::FlatData<int64_t>(compat::StructField(child, 0));
+        auto split_out = compat::FlatData<int32_t>(compat::StructField(child, 1));
+        auto role_out = compat::FlatData<string_t>(compat::StructField(child, 2));
         for (idx_t e = 0; e < splits.len; e++) {
             id_out[list_offset + e] = (*s.ids)[splits.row[e]];
             split_out[list_offset + e] = static_cast<int32_t>(splits.split[e]);
@@ -213,8 +212,7 @@ struct PurgedState {
     std::vector<double> *t_end;
 };
 
-void PurgedInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<PurgedState *>(state_p);
+void PurgedInitialize(PurgedState &s) {
     s.initialized = false;
     s.method = new std::string();
     s.options = new std::string();
@@ -240,7 +238,7 @@ void PurgedUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &state_ve
         inputs[a].ToUnifiedFormat(count, d[a]);
     }
     state_vector.ToUnifiedFormat(count, sdata);
-    auto states = reinterpret_cast<PurgedState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<PurgedState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         idx_t k[5];
@@ -286,9 +284,9 @@ void PurgedCombine(Vector &source_vector, Vector &target_vector, AggregateInputD
     }
 }
 
-void PurgedFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void PurgedFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<PurgedState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -306,13 +304,12 @@ void PurgedFinalize(Vector &state_vector, AggregateInputData &, Vector &result, 
         }
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + splits.len);
-        auto &child = ListVector::GetEntry(result);
-        auto &fields = StructVector::GetEntries(child);
-        auto id_out = FlatVector::GetData<int64_t>(*fields[0]);
-        auto split_out = FlatVector::GetData<int32_t>(*fields[1]);
-        auto role_out = FlatVector::GetData<string_t>(*fields[2]);
-        auto path_out = FlatVector::GetData<int32_t>(*fields[3]);
-        auto &path_validity = FlatVector::Validity(*fields[3]);
+        auto &child = compat::ListChild(result);
+        auto id_out = compat::FlatData<int64_t>(compat::StructField(child, 0));
+        auto split_out = compat::FlatData<int32_t>(compat::StructField(child, 1));
+        auto role_out = compat::FlatData<string_t>(compat::StructField(child, 2));
+        auto path_out = compat::FlatData<int32_t>(compat::StructField(child, 3));
+        auto &path_validity = compat::FlatValidity(compat::StructField(child, 3));
         for (idx_t e = 0; e < splits.len; e++) {
             id_out[list_offset + e] = (*s.ids)[splits.row[e]];
             split_out[list_offset + e] = static_cast<int32_t>(splits.split[e]);
@@ -345,8 +342,7 @@ struct SpatialState {
     idx_t d;
 };
 
-void SpatialInitialize(const AggregateFunction &, data_ptr_t state_p) {
-    auto &s = *reinterpret_cast<SpatialState *>(state_p);
+void SpatialInitialize(SpatialState &s) {
     s.initialized = false;
     s.method = new std::string();
     s.options = new std::string();
@@ -373,11 +369,11 @@ void SpatialUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &state_v
     inputs[3].ToUnifiedFormat(count, o_data);
     state_vector.ToUnifiedFormat(count, sdata);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(c_data);
-    auto &child = ListVector::GetEntry(inputs[1]);
+    auto &child = compat::ListChild(inputs[1]);
     UnifiedVectorFormat child_data;
     child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
     auto values = UnifiedVectorFormat::GetData<double>(child_data);
-    auto states = reinterpret_cast<SpatialState **>(sdata.data);
+    auto states = UnifiedVectorFormat::GetData<SpatialState *>(sdata);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[sdata.sel->get_index(i)];
         auto ii = id_data.sel->get_index(i);
@@ -435,9 +431,9 @@ void SpatialCombine(Vector &source_vector, Vector &target_vector, AggregateInput
     }
 }
 
-void SpatialFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+void SpatialFinalize(Vector &state_vector, compat::FinalizeInput &, Vector &result, idx_t count, idx_t offset) {
     auto states = FlatVector::GetData<SpatialState *>(state_vector);
-    auto entries = FlatVector::GetData<list_entry_t>(result);
+    auto entries = compat::FlatData<list_entry_t>(result);
     for (idx_t i = 0; i < count; i++) {
         auto &s = *states[i];
         idx_t row = i + offset;
@@ -455,10 +451,10 @@ void SpatialFinalize(Vector &state_vector, AggregateInputData &, Vector &result,
         }
         idx_t list_offset = ListVector::GetListSize(result);
         ListVector::Reserve(result, list_offset + splits.len);
-        auto &fields = StructVector::GetEntries(ListVector::GetEntry(result));
-        auto id_out = FlatVector::GetData<int64_t>(*fields[0]);
-        auto split_out = FlatVector::GetData<int32_t>(*fields[1]);
-        auto role_out = FlatVector::GetData<string_t>(*fields[2]);
+        auto &structs = compat::ListChild(result);
+        auto id_out = compat::FlatData<int64_t>(compat::StructField(structs, 0));
+        auto split_out = compat::FlatData<int32_t>(compat::StructField(structs, 1));
+        auto role_out = compat::FlatData<string_t>(compat::StructField(structs, 2));
         for (idx_t e = 0; e < splits.len; e++) {
             id_out[list_offset + e] = (*s.ids)[splits.row[e]];
             split_out[list_offset + e] = static_cast<int32_t>(splits.split[e]);
@@ -482,9 +478,9 @@ void RegisterMlCv(ExtensionLoader &loader) {
 
     AggregateFunctionSet set(kFunction);
     auto add = [&](vector<LogicalType> args, aggregate_update_t update) {
-        AggregateFunction f(kFunction, std::move(args), result, AggregateFunction::StateSize<CvState>, CvInitialize,
-                            update, CvCombine, CvFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr,
-                            CvDestroy);
+        AggregateFunction f(kFunction, std::move(args), result, AggregateFunction::StateSize<CvState>,
+                            compat::StateInit<CvInitialize>, update, CvCombine, CvFinalize,
+                            FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr, CvDestroy);
         set.AddFunction(f);
     };
     add({B, V, V}, CvUpdate<int64_t>);
@@ -499,14 +495,15 @@ void RegisterMlCv(ExtensionLoader &loader) {
     purged_fields.emplace_back("role", LogicalType(LogicalTypeId::VARCHAR));
     purged_fields.emplace_back("path", LogicalType(LogicalTypeId::INTEGER));
     AggregateFunction purged(kPurged, {B, D, D, V, V}, LogicalType::LIST(LogicalType::STRUCT(std::move(purged_fields))),
-                             AggregateFunction::StateSize<PurgedState>, PurgedInitialize, PurgedUpdate, PurgedCombine,
-                             PurgedFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr, nullptr, PurgedDestroy);
+                             AggregateFunction::StateSize<PurgedState>, compat::StateInit<PurgedInitialize>,
+                             PurgedUpdate, PurgedCombine, PurgedFinalize, FunctionNullHandling::SPECIAL_HANDLING,
+                             nullptr, nullptr, PurgedDestroy);
     loader.RegisterFunction(purged);
 
     AggregateFunction spatial(kSpatial, {B, LogicalType::LIST(D), V, V}, result,
-                              AggregateFunction::StateSize<SpatialState>, SpatialInitialize, SpatialUpdate,
-                              SpatialCombine, SpatialFinalize, FunctionNullHandling::SPECIAL_HANDLING, nullptr,
-                              nullptr, SpatialDestroy);
+                              AggregateFunction::StateSize<SpatialState>, compat::StateInit<SpatialInitialize>,
+                              SpatialUpdate, SpatialCombine, SpatialFinalize, FunctionNullHandling::SPECIAL_HANDLING,
+                              nullptr, nullptr, SpatialDestroy);
     loader.RegisterFunction(spatial);
 }
 

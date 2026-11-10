@@ -9,7 +9,7 @@ SET anofox_telemetry_enabled = false;
 
 # scikit-learn: HashingVectorizer(n_features=16).transform([doc])
 query II
-SELECT s.indices, list_bool_and(list_transform(list_zip(s.values, [0.242535625036, -0.485071250073, 0.242535625036, 0.242535625036, 0.242535625036, -0.727606875109]), p -> abs(p[1] - p[2]) < 1e-9))
+SELECT s.indices, list_bool_and(list_transform(list_zip(s.values, [0.242535625036, -0.485071250073, 0.242535625036, 0.242535625036, 0.242535625036, -0.727606875109]), lambda p: abs(p[1] - p[2]) < 1e-9))
 FROM (SELECT ml_hashing_vectorize_sparse('The quick brown fox jumps over the lazy dog the end', 16) AS s);
 ----
 [0, 7, 9, 11, 13, 14]	true

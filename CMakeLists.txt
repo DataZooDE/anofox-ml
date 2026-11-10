@@ -130,9 +130,11 @@ build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 # posthog-telemetry reads the machine id from the IORegistry on macOS, which
 # needs IOKit and CoreFoundation linked explicitly.
+# DuckDB 2.0's httplib loads the system certificates through the Security
+# framework (SecTrustSettingsCopyCertificates).
 if(APPLE AND ANOFOX_TELEMETRY_ENABLED)
-    target_link_libraries(${EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation")
+    target_link_libraries(${EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation" "-framework Security")
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework IOKit" "-framework CoreFoundation" "-framework Security")
 endif()
 
 # Link to Rust library

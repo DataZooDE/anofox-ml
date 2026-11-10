@@ -1,0 +1,23 @@
+{
+  "name": "anofox-ml",
+  "description": "Claude Code skills for the anofox_ml DuckDB extension: machine learning in SQL.",
+  "owner": {
+    "name": "DataZoo GmbH",
+    "url": "https://github.com/DataZooDE"
+  },
+  "plugins": [
+    {
+      "name": "anofox-ml",
+      "source": "./plugins/anofox-ml",
+      "description": "SQL-native machine learning skills for the anofox_ml DuckDB extension: fitting and predicting with 188 scikit-learn-compatible estimators, features / clustering / outliers / embeddings, metrics / cross-validation / tuning / conformal intervals, and ensembles, offsets, multi-target models and drift monitoring.",
+      "keywords": [
+        "duckdb",
+        "machine-learning",
+        "scikit-learn",
+        "sql",
+        "analytics",
+        "claude-code"
+      ]
+    }
+  ]
+}

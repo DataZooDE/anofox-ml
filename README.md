@@ -10,12 +10,15 @@
   <a href="https://duckdb.org"><img src="https://img.shields.io/badge/DuckDB-1.5.6-green.svg" alt="DuckDB"></a>
   <a href="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=main" alt="Build"></a>
   <img src="https://img.shields.io/badge/estimators-188-brightgreen.svg" alt="188 estimators">
+  <a href="#-claude-code-skills"><img src="https://img.shields.io/badge/Claude_Code-AI_skills_plugin-8A2BE2" alt="Claude Code plugin"></a>
   <img src="https://img.shields.io/badge/status-early%20development-orange.svg" alt="Status: early development">
 </p>
 
 A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 188 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
-> **Status: early development.** The functions below work and are tested. The remaining anofox-ml estimators are tracked in the [issues](https://github.com/DataZooDE/anofox-ml/issues) and in sipemu/anofox-ml#91.
+> **Status: early development.** The functions below work and are tested; the API may still change.
+
+> **🤖 Claude Code plugin.** Four [skills](#-claude-code-skills) teach Claude the SQL API, so it writes working `ml_fit_agg`, tuning and evaluation queries from a plain-English request. Install with `/plugin marketplace add DataZooDE/anofox-ml` → `/plugin install anofox-ml@anofox-ml`.
 
 
 ## ✨ Key Features
@@ -57,6 +60,7 @@ A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-
 - [Key Features](#-key-features)
 - [Installation](#installation)
 - [Quick Start](#-quick-start)
+- [Claude Code Skills](#-claude-code-skills)
 - [API Reference](#-api-reference)
 - [Estimators](#-estimators)
 - [Behaviour Notes](#-behaviour-notes)
@@ -193,6 +197,24 @@ SELECT ml_model_fitted(ml_fit_agg('OlsRegressor', y, [x1, x2], '{}', weight)) FR
 -- every estimator and its defaults
 SELECT kind, default_params FROM ml_estimators();
 ```
+
+## 🤖 Claude Code Skills
+
+anofox-ml ships a [Claude Code](https://claude.com/claude-code) plugin with four skills. They cover every function, the option names and the gotchas (row order in per-row aggregates, NaN for imputers, evaluation on held-out rows). Every SQL example in them runs against the built extension (`make check_skills`).
+
+```
+/plugin marketplace add DataZooDE/anofox-ml
+/plugin install anofox-ml@anofox-ml
+```
+
+| Skill | Covers |
+|---|---|
+| `anofox-ml-modeling` | `ml_fit_agg` per group, the predict functions, params, string labels, weights, inspection, warm start / partial fit, `ml_fit_predict_by` |
+| `anofox-ml-features` | scalers and transformers, categorical and text features, imputation, clustering, outlier scores, embeddings, covariance |
+| `anofox-ml-evaluation` | metric aggregates, cross-validation splitters, `ml_tune_agg` (grid / random / halving / TPE), feature importance, conformal intervals and sets |
+| `anofox-ml-advanced` | voting / stacking / calibration / transformed targets, GLM offsets, multi-target, CCA, Gaussian processes, drift and DLE monitoring |
+
+The skills live in [`plugins/anofox-ml/`](plugins/anofox-ml/). For development, load them with `claude --plugin-dir ./plugins/anofox-ml`.
 
 ## 📚 API Reference
 
@@ -458,7 +480,7 @@ The defaults (`SELECT default_params FROM ml_estimators() WHERE kind = '…'`) s
 ```sql
 SELECT ml_fit_agg('VotingClassifier', churn, [a, b, c], '{"voting": "soft", "weights": [1, 2],
        "estimators": [{"estimator": "GaussianNB", "estimator_params": {}},
-                      {"estimator": "HistGradientBoostingClassifier", "estimator_params": {"max_iter": 200}}]}') AS model
+                      {"estimator": "HistGradientBoostingClassifier", "estimator_params": {"n_estimators": 200}}]}') AS model
 FROM customers;
 
 SELECT ml_fit_agg('StackingRegressor', units, [price, promo], '{"cv": 5,
@@ -688,6 +710,7 @@ make test                         # SQL logic tests in test/sql
 cargo test                        # Rust FFI tests
 cargo fmt --all                   # format
 cargo clippy --all-targets        # lint
+make check_skills                 # run the skills' SQL examples
 ```
 
 ### Layout
@@ -697,6 +720,7 @@ cargo clippy --all-targets        # lint
 | `src/` | C++ extension: thin DuckDB wrappers around the C ABI |
 | `crates/anofox-ml-ffi/` | Rust `staticlib`: generic C ABI over [`anofox-ml-registry`](https://crates.io/crates/anofox-ml-registry) |
 | `test/sql/` | sqllogictests |
+| `plugins/anofox-ml/` | Claude Code plugin (skills); `scripts/check_skill_snippets.py` runs their SQL |
 
 The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml) 0.5 on crates.io (`anofox-ml-registry`, `-core`, `-metrics`, `-conformal`, `-text`).
 

@@ -9,6 +9,7 @@
 
 ### Added
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
+- Meta-estimators through `ml_fit_agg`, with tests against scikit-learn and recipes: `VotingRegressor` / `VotingClassifier` (weights, hard / soft voting), `StackingRegressor` / `StackingClassifier`, `CalibratedClassifierCV` and `TransformedTargetRegressor` (#12).
 - Multi-target kinds (`MultiOutputRegressor`, `RegressorChain`, `MultiTaskLasso`, …) fitted on `[X | Y]` with `y_columns`, and `ml_predict_targets(model, x)` for their per-target predictions (#11).
 - `ml_predict_std(model, x)`: predictive standard deviation of `GaussianProcessRegressor` (#11).
 - `OlsRegressor` / `RidgeRegressor` with `inference: true`: prediction intervals through `ml_predict_interval` and the coefficient table in `ml_model_fitted` (#11).

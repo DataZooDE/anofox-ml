@@ -443,6 +443,35 @@ SELECT ml_fit_agg('FixedThresholdClassifier', churn, [a, b],
 
 The defaults (`SELECT default_params FROM ml_estimators() WHERE kind = '…'`) show every option. `TunedThresholdClassifierCV` scores with `BalancedAccuracy` (default), `Accuracy`, `F1`, `Precision` or `Recall`.
 
+**Ensembles of different models.** `VotingRegressor` / `VotingClassifier` and `StackingRegressor` / `StackingClassifier` take a list of `{estimator, estimator_params}` specs, as scikit-learn's `estimators=[...]`. Voting averages the members' predictions (with optional `weights`; the classifier by majority, `"voting": "hard"`, or by mean probability, `"soft"`). Stacking fits `final_estimator` on the members' `cv`-fold out-of-fold predictions (KFold / StratifiedKFold without shuffling; `passthrough` adds the features, `stack_method` picks `predict_proba` / `decision_function` / `predict`):
+
+```sql
+SELECT ml_fit_agg('VotingClassifier', churn, [a, b, c], '{"voting": "soft", "weights": [1, 2],
+       "estimators": [{"estimator": "GaussianNB", "estimator_params": {}},
+                      {"estimator": "HistGradientBoostingClassifier", "estimator_params": {"max_iter": 200}}]}') AS model
+FROM customers;
+
+SELECT ml_fit_agg('StackingRegressor', units, [price, promo], '{"cv": 5,
+       "estimators": [{"estimator": "RidgeRegressor", "estimator_params": {}}, {"estimator": "RandomForestRegressor", "estimator_params": {}}],
+       "final_estimator": {"estimator": "OlsRegressor", "estimator_params": {}}}') AS model
+FROM sales;
+```
+
+**Calibrated probabilities.** `CalibratedClassifierCV` calibrates a classifier's decision function (else its probabilities) on held-out folds: `"method": "sigmoid"` (Platt, default) or `"isotonic"`, one-vs-rest for more than two classes, one calibrated model per fold averaged (`"ensemble": true`) or one model on all rows. It turns margin classifiers such as `LinearSvc` (the default `estimator`) into probabilistic ones:
+
+```sql
+SELECT ml_predict_proba(model, [a, b]) FROM test,
+       (SELECT ml_fit_agg('CalibratedClassifierCV', label, [a, b], '{"estimator": "GaussianNB", "method": "isotonic"}') AS model FROM train);
+```
+
+**Transformed targets.** `TransformedTargetRegressor` fits `regressor` on `func(y)` (`"log"`, `"log1p"`, `"sqrt"`, `"identity"`) or on `y` transformed by a `transformer` kind (`StandardScaler`, `PowerTransformer`, `QuantileTransformer`, …) and maps its predictions back, e.g. a log-linear model for skewed, positive targets:
+
+```sql
+SELECT ml_fit_agg('TransformedTargetRegressor', revenue, [x1, x2],
+       '{"func": "log", "regressor": {"estimator": "RidgeRegressor", "estimator_params": {"lambda": 0.1}}}') AS model
+FROM shops;
+```
+
 **Categorical features in CatBoost.** `CatBoostRegressor` / `CatBoostClassifier` build target statistics for the columns listed in `cat_features` (0-based indices into the feature list). Encode string categories as integer codes first (`dense_rank() OVER (ORDER BY store) - 1`, or `ml_fit_agg('OrdinalEncoder', …)`). They use CatBoost's own defaults: random permutations, MVS bootstrap and score noise. For a fit that depends only on the row order, pass `{"has_time": true, "random_strength": 0, "bootstrap_type": "No"}` and order the rows inside the aggregate:
 
 ```sql

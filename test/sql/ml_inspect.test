@@ -108,3 +108,24 @@ statement error
 SELECT ml_rfe_agg('OlsRegressor', y, x, '{}', '{"step": 0}') FROM rfe;
 ----
 step must be a positive count
+
+# k nearest training rows (anofox-ml 0.5): positions in the fit's input order
+statement ok
+CREATE TABLE nn AS SELECT i, [i::DOUBLE, (i % 3)::DOUBLE] AS x, (i * 2)::DOUBLE AS y FROM range(10) t(i);
+
+query II
+SELECT r.indices, list_transform(r.distances, lambda d: round(d, 6)) FROM (
+    SELECT ml_kneighbors(ml_fit_agg('KnnRegressor', y, x ORDER BY i), [4.2, 1.0], 3) AS r FROM nn);
+----
+[4, 5, 3]	[0.2, 1.280625, 1.56205]
+
+# default k: the model's n_neighbors (5); a training row is its own nearest neighbour
+query II
+SELECT len(r.indices), r.indices[1] FROM (SELECT ml_kneighbors(ml_fit_agg('KnnClassifier', (i % 2)::DOUBLE, x ORDER BY i), [7.0, 1.0]) AS r FROM nn);
+----
+5	7
+
+statement error
+SELECT ml_kneighbors(ml_fit_agg('OlsRegressor', y, x), [1.0, 1.0]) FROM nn;
+----
+does not support kneighbors

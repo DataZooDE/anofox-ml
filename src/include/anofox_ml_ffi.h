@@ -196,6 +196,12 @@ char *anofox_ml_warm_start(const uint8_t *model, size_t model_len, const char *p
                            size_t n_rows, size_t n_cols, const double *y, const char *const *y_labels, size_t threads,
                            AnofoxMlBytes *out);
 
+// The k nearest training rows of each of n_rows rows of x (kNN kinds; k = 0:
+// the model's n_neighbors): dist / idx receive n_rows * k_out values,
+// row-major, nearest first; idx are 0-based training-row positions.
+char *anofox_ml_kneighbors(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
+                           size_t k, AnofoxMlDoubles *dist, AnofoxMlDoubles *idx, size_t *k_out);
+
 // Whether `kind` fits on unlabelled rows (semi-supervised kinds): ml_fit_agg
 // then passes rows with a NULL target as y = -1, or as a NULL label.
 bool anofox_ml_accepts_unlabelled(const char *kind);

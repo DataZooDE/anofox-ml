@@ -1,5 +1,5 @@
 # name: test/sql/ml_tune.test
-# description: hyperparameter search (grid / random) with k-fold CV
+# description: hyperparameter search (grid / random / halving / TPE) with k-fold CV
 # group: [anofox_ml]
 
 require anofox_ml
@@ -83,5 +83,32 @@ true	true	true
 
 query I
 SELECT (ml_tune_agg('DecisionTreeRegressor', y, [x], '{"max_depth": {"int": [1, 8]}}', '{"search": "halving", "n_trials": 9, "metric": "rmse"}')).best_score < 1 FROM d;
+----
+true
+
+# TPE: 10 random start-up trials, then each trial proposed from the earlier
+# scores. Noisy sine: few neighbours fit the noise, many flatten the curve.
+statement ok
+CREATE TABLE s AS SELECT i, i / 300 * 6.0 AS x, sin(i / 300 * 6.0) + ((i * 7919) % 101) / 101.0 - 0.5 AS y FROM range(300) t(i);
+
+statement ok
+CREATE TABLE tpe AS SELECT ml_tune_agg('KnnRegressor', y, [x], '{"n_neighbors": {"int": [1, 150], "log": true}}',
+    '{"search": "tpe", "n_trials": 30, "n_startup_trials": 10, "seed": 1, "metric": "rmse", "cv": 4}' ORDER BY i) AS t FROM s;
+
+# seeded: the same trials again; the model-based trials beat the random ones on average
+statement ok
+CREATE MACRO scores(trials) AS list_transform(regexp_extract_all(trials, '"score":([0-9.eE+-]+)', 1), lambda v: v::DOUBLE);
+
+query III
+SELECT (SELECT t.trials FROM tpe) = t2.trials,
+       list_avg(scores(t2.trials)[21:]) < list_avg(scores(t2.trials)[:10]),
+       len(scores(t2.trials))
+FROM (SELECT ml_tune_agg('KnnRegressor', y, [x], '{"n_neighbors": {"int": [1, 150], "log": true}}',
+    '{"search": "tpe", "n_trials": 30, "n_startup_trials": 10, "seed": 1, "metric": "rmse", "cv": 4}' ORDER BY i) AS t2 FROM s);
+----
+true	true	30
+
+query I
+SELECT abs(ml_predict(t.model, [1.5]) - sin(1.5)) < 0.3 FROM tpe;
 ----
 true

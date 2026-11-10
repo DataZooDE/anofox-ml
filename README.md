@@ -295,9 +295,9 @@ SELECT ml_predict_label(model, ml_transform(idf, counts(body))) FROM new_mails, 
 `ml_tune_agg(kind, y, [x1, x2, …], search_space [, options])` searches hyperparameters by k-fold cross-validation and returns `STRUCT(best_params, best_score, model, trials)`. `model` is the best candidate refitted on all rows, ready for `ml_predict`, and `trials` is a JSON array of every candidate's mean / std score (or its error). Per `GROUP BY` group, one search each.
 
 - **Search space** (JSON object, one entry per parameter): a list of values (grid / categorical), `{"int": [lo, hi]}`, `{"float": [lo, hi]}` (both with optional `"log": true`) or `{"categorical": […]}`.
-- **Options:** `search` (`"random"` default, `"grid"`, or successive halving `"halving"` / `"halving_grid"`: all candidates on a small seeded subsample, the best `1/factor` (default 3) kept and the rows grown by `factor` each round), `n_trials` (20), `cv` (5 folds; stratified for classifiers unless `"stratify": false`), `metric` (any metric aggregate name; default `accuracy` / `r2`; losses are minimised), `metric_options`, `params` (fixed for every candidate), `seed`.
+- **Options:** `search` (`"random"` default, `"grid"`, successive halving `"halving"` / `"halving_grid"`: all candidates on a small seeded subsample, the best `1/factor` (default 3) kept and the rows grown by `factor` each round, or `"tpe"`: a tree-structured Parzen estimator as in Optuna, `n_startup_trials` (10) random trials and then each trial proposed from the earlier scores, `n_ei_candidates` (24) draws per proposal), `n_trials` (20), `cv` (5 folds; stratified for classifiers unless `"stratify": false`), `metric` (any metric aggregate name; default `accuracy` / `r2`; losses are minimised), `metric_options`, `params` (fixed for every candidate), `seed`.
 
-Candidates are drawn from `seed` up front and every candidate × fold is scored in parallel, so the result is the same whatever the thread count.
+Candidates are drawn from `seed` up front (TPE: one after the other, from `seed` and the earlier scores) and every candidate × fold is scored in parallel, so the result is the same whatever the thread count. TPE trials run one at a time, so only the folds of a trial run in parallel.
 
 ```sql
 SELECT store, t.best_params, t.best_score
@@ -613,7 +613,6 @@ SELECT ml_predict_proba(model, ml_transform(fm, [a, b])) FROM test, m;
 
 | Topic | Issue |
 |---|---|
-| TPE / Optuna-style tuning (rustuna) on top of `ml_tune_agg` | [#5](https://github.com/DataZooDE/anofox-ml/issues/5) |
 | Everything else in anofox-ml 0.5 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
 ## 🧮 Estimators

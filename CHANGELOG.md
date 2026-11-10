@@ -8,6 +8,7 @@
 - Building from source needs Rust 1.88 (was 1.87), for the PerpetualBooster kinds (#47).
 
 ### Added
+- `ml_tune_agg` with `search: "tpe"`: Bayesian optimisation with a tree-structured Parzen estimator (Optuna's univariate TPE), seeded and thread-count independent (#5).
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
 - Text vectorizers on `VARCHAR` documents: `ml_fit_agg(kind, text [, params])` for `CountVectorizer`, `TfidfVectorizer` and `HashingVectorizer`, and `ml_transform(model, text)`, matching scikit-learn (#14).
 - Meta-estimators through `ml_fit_agg`, with tests against scikit-learn and recipes: `VotingRegressor` / `VotingClassifier` (weights, hard / soft voting), `StackingRegressor` / `StackingClassifier`, `CalibratedClassifierCV` and `TransformedTargetRegressor` (#12).

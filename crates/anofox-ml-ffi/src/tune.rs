@@ -1,11 +1,12 @@
-//! Hyperparameter search behind `ml_tune_agg`: grid or seeded random search
-//! over a JSON search space, every candidate scored by k-fold
+//! Hyperparameter search behind `ml_tune_agg`: grid, seeded random,
+//! successive halving or TPE ([`crate::tpe`]) search over a JSON search space, every candidate scored by k-fold
 //! cross-validation with a metric of the metric aggregates, the best one
 //! refitted on all rows.
 //!
-//! Candidates are generated up front from the seed and each
-//! (candidate, fold) is scored independently, so the result does not depend
-//! on how many threads score them.
+//! Candidates are generated up front from the seed (TPE: one after the
+//! other from the seed and the earlier scores) and each (candidate, fold) is
+//! scored independently, so the result does not depend on how many threads
+//! score them.
 
 use std::ffi::c_char;
 
@@ -26,13 +27,17 @@ use crate::{
 #[serde(deny_unknown_fields)]
 struct Options {
     /// `"random"` (default), `"grid"`, `"halving"` (successive halving of
-    /// random candidates) or `"halving_grid"`.
+    /// random candidates), `"halving_grid"` or `"tpe"`.
     search: Option<String>,
     /// Halving: keep the best `1 / factor` of the candidates per round and
     /// grow the rows by `factor` (default 3).
     factor: Option<usize>,
-    /// Candidates of a random search (default 20).
+    /// Candidates of a random / TPE search (default 20).
     n_trials: Option<usize>,
+    /// TPE: random trials before the first model-based one (default 10).
+    n_startup_trials: Option<usize>,
+    /// TPE: draws from the good trials' estimator per proposal (default 24).
+    n_ei_candidates: Option<usize>,
     /// Folds (default 5).
     cv: Option<usize>,
     /// Stratify the folds on the target (default: for classifiers).
@@ -59,7 +64,7 @@ const LOSSES: &[&str] = &[
 ];
 
 /// One dimension of the search space.
-enum Dim {
+pub(crate) enum Dim {
     Int { lo: i64, hi: i64, log: bool },
     Float { lo: f64, hi: f64, log: bool },
     Choice(Vec<Value>),
@@ -109,7 +114,7 @@ fn parse_space(space: &str) -> Result<Vec<(String, Dim)>, String> {
         .collect()
 }
 
-fn sample(dim: &Dim, rng: &mut StdRng) -> Value {
+pub(crate) fn sample(dim: &Dim, rng: &mut StdRng) -> Value {
     match dim {
         Dim::Int { lo, hi, log: false } => json!(rng.gen_range(*lo..=*hi)),
         Dim::Int { lo, hi, log: true } => {
@@ -166,8 +171,9 @@ fn candidates(space: &[(String, Dim)], o: &Options) -> Result<Vec<Map<String, Va
                 })
                 .collect())
         }
+        "tpe" => Ok(Vec::new()),
         s => Err(format!(
-            "search must be \"random\", \"grid\", \"halving\" or \"halving_grid\", got \"{s}\""
+            "search must be \"random\", \"grid\", \"halving\", \"halving_grid\" or \"tpe\", got \"{s}\""
         )),
     }
 }
@@ -227,14 +233,12 @@ pub(crate) fn tune(
     }
     let metric_options = metric_options.to_string();
     let fixed = o.params.clone().unwrap_or_default();
-    let full_params: Vec<Map<String, Value>> = cands
-        .iter()
-        .map(|c| {
-            let mut p = fixed.clone();
-            p.extend(c.clone());
-            p
-        })
-        .collect();
+    let with_fixed = |c: &Map<String, Value>| {
+        let mut p = fixed.clone();
+        p.extend(c.clone());
+        p
+    };
+    let full_params: Vec<Map<String, Value>> = cands.iter().map(with_fixed).collect();
 
     // Score one (candidate, fold); each fit runs sequentially inside the
     // parallel loop.
@@ -284,37 +288,101 @@ pub(crate) fn tune(
             None,
         )
     };
-    // Mean / std CV score of candidates `cand` on rows `rows`.
-    let round = |rows: &[usize], cand: &[usize]| -> Result<Vec<CandidateScore>, String> {
-        let (xs, ys) = (x.select(Axis(0), rows), y.select(Axis(0), rows));
-        let folds = if stratify {
-            ut::stratified_k_fold(&xs, &ys, k, seed)
-        } else {
-            ut::shuffled_k_fold(rows.len(), k, seed)
-        }
-        .map_err(|e| e.to_string())?;
-        let jobs: Vec<(usize, usize)> = cand
-            .iter()
-            .flat_map(|&c| (0..folds.len()).map(move |f| (c, f)))
-            .collect();
-        let scores: Vec<Result<f64, String>> = run_fit(threads, || {
-            jobs.par_iter()
-                .map(|&(c, f)| score_fold(xs.view(), ys.view(), &full_params[c], &folds[f]))
-                .collect()
-        })?;
-        Ok(scores
-            .chunks(folds.len())
-            .map(|s| {
-                let s: Vec<f64> = s.iter().cloned().collect::<Result<_, _>>()?;
-                let mean = s.iter().sum::<f64>() / s.len() as f64;
-                let std =
-                    (s.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
-                Ok((mean, std))
-            })
-            .collect())
-    };
+    // Mean / std CV score of the parameter sets `cand` on rows `rows`.
+    let round =
+        |rows: &[usize], cand: &[&Map<String, Value>]| -> Result<Vec<CandidateScore>, String> {
+            let (xs, ys) = (x.select(Axis(0), rows), y.select(Axis(0), rows));
+            let folds = if stratify {
+                ut::stratified_k_fold(&xs, &ys, k, seed)
+            } else {
+                ut::shuffled_k_fold(rows.len(), k, seed)
+            }
+            .map_err(|e| e.to_string())?;
+            let jobs: Vec<(usize, usize)> = (0..cand.len())
+                .flat_map(|c| (0..folds.len()).map(move |f| (c, f)))
+                .collect();
+            let scores: Vec<Result<f64, String>> = run_fit(threads, || {
+                jobs.par_iter()
+                    .map(|&(c, f)| score_fold(xs.view(), ys.view(), cand[c], &folds[f]))
+                    .collect()
+            })?;
+            Ok(scores
+                .chunks(folds.len())
+                .map(|s| {
+                    let s: Vec<f64> = s.iter().cloned().collect::<Result<_, _>>()?;
+                    let mean = s.iter().sum::<f64>() / s.len() as f64;
+                    let std =
+                        (s.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+                    Ok((mean, std))
+                })
+                .collect())
+        };
     let better = |a: f64, b: f64| if minimise { a < b } else { a > b };
     let n = x.nrows();
+    let record = |t: &mut Value, res: CandidateScore| -> Option<f64> {
+        match res {
+            Ok((mean, std)) => {
+                t["score"] = json!(mean);
+                t["score_std"] = json!(std);
+                mean.is_finite().then_some(mean)
+            }
+            Err(e) => {
+                t["error"] = json!(e);
+                None
+            }
+        }
+    };
+    // Refit the best parameters on all rows.
+    let finish = |best: Option<(Map<String, Value>, f64)>,
+                  trials: Vec<Value>|
+     -> Result<TuneResult, String> {
+        let (params, best_score) = best.ok_or_else(|| {
+            let first = trials
+                .iter()
+                .find_map(|t| t.get("error"))
+                .cloned()
+                .unwrap_or_default();
+            format!("every trial failed (first error: {first})")
+        })?;
+        let p = Value::Object(params.clone()).to_string();
+        let model = fit_impl(kind, &p, x, Some(y), None, labels.clone(), threads)?;
+        Ok(TuneResult {
+            best_params: Value::Object(params),
+            best_score,
+            model,
+            trials: Value::Array(trials),
+        })
+    };
+    if o.search.as_deref() == Some("tpe") {
+        // One trial at a time, each proposed from the scores before it.
+        let mut rng = StdRng::seed_from_u64(seed);
+        let rows: Vec<usize> = (0..n).collect();
+        let (n_startup, n_ei) = (
+            o.n_startup_trials.unwrap_or(10),
+            o.n_ei_candidates.unwrap_or(24),
+        );
+        let mut cands: Vec<Map<String, Value>> = Vec::new();
+        let mut scored: Vec<(usize, f64)> = Vec::new();
+        let mut trials = Vec::new();
+        for c in 0..o.n_trials.unwrap_or(20).max(1) {
+            let history: Vec<(&Map<String, Value>, f64)> =
+                scored.iter().map(|&(i, s)| (&cands[i], s)).collect();
+            let next = crate::tpe::propose(&space, &history, minimise, n_startup, n_ei, &mut rng);
+            let res = round(&rows, &[&with_fixed(&next)])?.remove(0);
+            let mut t = json!({"trial": c, "params": next});
+            if let Some(s) = record(&mut t, res) {
+                scored.push((c, s));
+            }
+            trials.push(t);
+            cands.push(next);
+        }
+        // Ties keep the earlier trial.
+        let best = scored
+            .iter()
+            .copied()
+            .reduce(|b, s| if better(s.1, b.1) { s } else { b });
+        return finish(best.map(|(c, s)| (with_fixed(&cands[c]), s)), trials);
+    }
     let halving = matches!(o.search.as_deref(), Some("halving") | Some("halving_grid"));
     let factor = o.factor.unwrap_or(3).max(2);
     // Rounds: (rows, candidates). Halving starts on n / factor^(rounds-1)
@@ -346,7 +414,9 @@ pub(crate) fn tune(
         };
         let mut rows: Vec<usize> = perm[..n_rows].to_vec();
         rows.sort_unstable();
-        let res = round(&rows, &alive)?;
+        let alive_params: Vec<&Map<String, Value>> =
+            alive.iter().map(|&c| &full_params[c]).collect();
+        let res = round(&rows, &alive_params)?;
         let mut scored: Vec<(usize, f64)> = Vec::new();
         for (&c, res) in alive.iter().zip(res) {
             let mut t = json!({"trial": c, "params": cands[c]});
@@ -354,15 +424,8 @@ pub(crate) fn tune(
                 t["round"] = json!(r);
                 t["n_rows"] = json!(n_rows);
             }
-            match res {
-                Ok((mean, std)) => {
-                    t["score"] = json!(mean);
-                    t["score_std"] = json!(std);
-                    if mean.is_finite() {
-                        scored.push((c, mean));
-                    }
-                }
-                Err(e) => t["error"] = json!(e),
+            if let Some(s) = record(&mut t, res) {
+                scored.push((c, s));
             }
             trials.push(t);
         }
@@ -387,22 +450,7 @@ pub(crate) fn tune(
             break;
         }
     }
-    let (bi, best_score) = best.ok_or_else(|| {
-        let first = trials
-            .iter()
-            .find_map(|t| t.get("error"))
-            .cloned()
-            .unwrap_or_default();
-        format!("every trial failed (first error: {first})")
-    })?;
-    let params = Value::Object(full_params[bi].clone()).to_string();
-    let model = fit_impl(kind, &params, x, Some(y), None, labels, threads)?;
-    Ok(TuneResult {
-        best_params: Value::Object(full_params[bi].clone()),
-        best_score,
-        model,
-        trials: Value::Array(trials),
-    })
+    finish(best.map(|(c, s)| (full_params[c].clone(), s)), trials)
 }
 
 #[repr(C)]
@@ -612,5 +660,40 @@ mod tests {
         );
         assert_eq!(t.last().unwrap()["n_rows"], 200);
         assert_ne!(r.best_params["max_depth"], 0, "{}", r.trials);
+    }
+
+    #[test]
+    fn tpe_is_seeded_thread_independent_and_improves_on_the_startup_trials() {
+        // Noisy sine: few neighbours fit the noise, many flatten the curve.
+        let n = 300;
+        let x = Array2::from_shape_fn((n, 1), |(i, _)| i as f64 / n as f64 * 6.0);
+        let y = Array1::from_shape_fn(n, |i| {
+            (i as f64 / n as f64 * 6.0).sin() + (((i * 7919) % 101) as f64 / 101.0 - 0.5)
+        });
+        let space = r#"{"n_neighbors": {"int": [1, 150], "log": true}}"#;
+        let opts = r#"{"search": "tpe", "n_trials": 30, "n_startup_trials": 10, "seed": 1, "metric": "rmse", "cv": 4}"#;
+        let run = |threads| {
+            tune(
+                "KnnRegressor",
+                space,
+                opts,
+                x.view(),
+                y.view(),
+                None,
+                threads,
+            )
+            .unwrap()
+        };
+        let (a, b) = (run(1), run(8));
+        assert_eq!(a.trials, b.trials);
+        assert_eq!(a.model, b.model);
+        let t = a.trials.as_array().unwrap();
+        assert_eq!(t.len(), 30);
+        // The model-based trials do better on average than the random ones.
+        let score = |t: &Value| t["score"].as_f64().unwrap();
+        let mean = |t: &[Value]| t.iter().map(score).sum::<f64>() / t.len() as f64;
+        assert!(mean(&t[20..]) < mean(&t[..10]), "{}", a.trials);
+        let k = a.best_params["n_neighbors"].as_i64().unwrap();
+        assert!((5..=60).contains(&k), "{}", a.trials);
     }
 }

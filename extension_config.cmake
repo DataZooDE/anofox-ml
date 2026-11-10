@@ -24,13 +24,22 @@ endif()
 # the Rust FFI archive every anofox_ml_* function is an unresolved import and
 # the module can't load (#29). LINKED_LIBS is unused outside WASM.
 set(ANOFOX_ML_LINKED_LIBS "$<TARGET_FILE:anofox_ml_ffi-static>")
-# wasm_eh: current Rust objects declare the bulk-memory-opt and
+# Current Rust objects declare the bulk-memory-opt and
 # call-indirect-overlong target features, which emsdk 3.1.71's binaryen
 # rejects; their instructions are covered by bulk-memory and reference-types,
-# so the feature list is given explicitly (the extra arguments ride on
+# so each wasm platform's feature list is given explicitly, as wasm-opt
+# enables them for that platform (the extra arguments ride on
 # LINKED_LIBS, which DuckDB splits on spaces). As in anofox-forecast.
+set(ANOFOX_ML_WASM_FEATURES "")
 if("${DUCKDB_EXPLICIT_PLATFORM}" STREQUAL "wasm_eh")
-    string(APPEND ANOFOX_ML_LINKED_LIBS " -Xlinker --no-check-features -Xlinker --features=bulk-memory,exception-handling,multivalue,mutable-globals,nontrapping-fptoint,reference-types,sign-ext,simd128")
+    set(ANOFOX_ML_WASM_FEATURES "bulk-memory,exception-handling,multivalue,mutable-globals,nontrapping-fptoint,reference-types,sign-ext,simd128")
+elseif("${DUCKDB_EXPLICIT_PLATFORM}" STREQUAL "wasm_mvp")
+    set(ANOFOX_ML_WASM_FEATURES "bulk-memory,exception-handling,multivalue,mutable-globals,nontrapping-fptoint,reference-types,sign-ext")
+elseif("${DUCKDB_EXPLICIT_PLATFORM}" STREQUAL "wasm_threads")
+    set(ANOFOX_ML_WASM_FEATURES "atomics,bulk-memory,exception-handling,multivalue,mutable-globals,nontrapping-fptoint,reference-types,sign-ext")
+endif()
+if(NOT ANOFOX_ML_WASM_FEATURES STREQUAL "")
+    string(APPEND ANOFOX_ML_LINKED_LIBS " -Xlinker --no-check-features -Xlinker --features=${ANOFOX_ML_WASM_FEATURES}")
 endif()
 
 set(ANOFOX_ML_VERSION_ARG "")

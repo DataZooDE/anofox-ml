@@ -376,8 +376,11 @@ fn run_method(
         p.install(|| match method {
             "predict" => model.predict(x),
             "predict_proba" => model.predict_proba(x),
-            // ln of the probabilities (anofox-ml 0.2's DynModel has no
-            // predict_log_proba); 0 probabilities give -inf.
+            // Native where the estimator has it (finite where predict_proba
+            // underflows); otherwise ln of the probabilities (0 gives -inf).
+            "predict_log_proba" if model.capabilities().contains(&"predict_log_proba") => {
+                model.predict_log_proba(x)
+            }
             "predict_log_proba" => model.predict_proba(x).map(|o| match o {
                 Out::A1(a) => Out::A1(a.mapv(f64::ln)),
                 Out::A2(a) => Out::A2(a.mapv(f64::ln)),

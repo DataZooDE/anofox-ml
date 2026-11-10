@@ -367,10 +367,20 @@ SELECT ml_coefficients(ml_fit_agg('DecisionTreeRegressor', i::DOUBLE, [i::DOUBLE
 ----
 has no coef / weights
 
-# predict_log_proba = ln(predict_proba)
+# predict_log_proba: native for naive Bayes, LDA / QDA, Logistic, Svc, GMM
+# (anofox-ml 0.5; finite where predict_proba underflows to 0), else
+# ln(predict_proba)
+query II
+SELECT list_bool_and(list_transform(list_zip(ml_predict_log_proba(m, x), ml_predict_proba(m, x)), lambda p: CASE WHEN p[2] = 0 THEN true ELSE abs(p[1] - ln(p[2])) < 1e-9 END)),
+       list_bool_and(list_transform(ml_predict_log_proba(m, [100.0]), lambda v: isfinite(v)))
+FROM (SELECT ml_fit_agg('GaussianNB', (i % 3)::DOUBLE, [i::DOUBLE]) AS m FROM range(30) t(i)), (SELECT [3.0] AS x);
+----
+true	true
+
 query I
-SELECT list_bool_and(list_transform(list_zip(ml_predict_log_proba(m, [3.0]), ml_predict_proba(m, [3.0])), lambda p: abs(p[1] - ln(p[2])) < 1e-12 OR (p[2] = 0 AND p[1] = '-inf'::DOUBLE)))
-FROM (SELECT ml_fit_agg('GaussianNB', (i % 3)::DOUBLE, [i::DOUBLE]) AS m FROM range(30) t(i));
+SELECT list_bool_and(list_transform(list_zip(ml_predict_log_proba(m, [3.0]), ml_predict_proba(m, [3.0])),
+    lambda p: CASE WHEN p[2] = 0 THEN p[1] = '-inf'::DOUBLE ELSE abs(p[1] - ln(p[2])) < 1e-12 END))
+FROM (SELECT ml_fit_agg('RandomForestClassifier', (i % 3)::DOUBLE, [i::DOUBLE], '{"n_estimators": 5, "seed": 0}') AS m FROM range(30) t(i));
 ----
 true
 
@@ -575,7 +585,7 @@ true
 statement error
 SELECT ml_predict_proba(ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE]), [1.0]) FROM range(5) t(i);
 ----
-OlsRegressor does not support predict_proba (it supports: predict). 
+OlsRegressor does not support predict_proba (it supports: predict
 
 statement error
 SELECT ml_staged_predict(ml_fit_agg('OlsRegressor', i::DOUBLE, [i::DOUBLE]), [1.0]) FROM range(5) t(i);

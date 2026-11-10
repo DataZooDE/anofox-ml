@@ -24,6 +24,7 @@ mod metrics;
 mod select;
 mod stats;
 mod text;
+mod tpe;
 mod tune;
 
 use anofox_ml_registry::{DynModel, Out};

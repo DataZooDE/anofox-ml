@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include "duckdb.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -79,7 +81,8 @@ inline Vector &StructField(Vector &vector, idx_t index) {
 // Aggregate callbacks
 //===--------------------------------------------------------------------===//
 // State initialization, written once as `void INIT(STATE &)` and registered
-// as StateInit<INIT>. 2.0 initializes states in batches.
+// as StateInit<INIT>. 2.0 initializes states in batches. (MSVC deduces a
+// function reference for `auto INIT`, hence the decay.)
 template <class F>
 struct InitState;
 template <class STATE>
@@ -90,7 +93,7 @@ struct InitState<void (*)(STATE &)> {
 #if ANOFOX_DUCKDB_V2
 template <auto INIT>
 void StateInit(AggregateStateInput &, data_ptr_t *states, idx_t count) {
-    using STATE = typename InitState<decltype(INIT)>::type;
+    using STATE = typename InitState<std::decay_t<decltype(INIT)>>::type;
     for (idx_t i = 0; i < count; i++) {
         INIT(*reinterpret_cast<STATE *>(states[i]));
     }
@@ -98,7 +101,7 @@ void StateInit(AggregateStateInput &, data_ptr_t *states, idx_t count) {
 #else
 template <auto INIT>
 void StateInit(const AggregateFunction &, data_ptr_t state) {
-    using STATE = typename InitState<decltype(INIT)>::type;
+    using STATE = typename InitState<std::decay_t<decltype(INIT)>>::type;
     INIT(*reinterpret_cast<STATE *>(state));
 }
 #endif

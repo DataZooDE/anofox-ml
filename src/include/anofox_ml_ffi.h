@@ -202,6 +202,14 @@ char *anofox_ml_warm_start(const uint8_t *model, size_t model_len, const char *p
 char *anofox_ml_kneighbors(const uint8_t *model, size_t model_len, const double *x, size_t n_rows, size_t n_cols,
                            size_t k, AnofoxMlDoubles *dist, AnofoxMlDoubles *idx, size_t *k_out);
 
+// Fold n_rows new rows into a fitted model as one more batch (partial_fit:
+// naive Bayes, SGD, PassiveAggressive, MLP, scalers, IncrementalPca), after
+// merging the JSON params; targets y, string labels y_labels (y NULL), or
+// none (both NULL) for the unsupervised kinds.
+char *anofox_ml_partial_fit(const uint8_t *model, size_t model_len, const char *params, const double *x,
+                            size_t n_rows, size_t n_cols, const double *y, const char *const *y_labels, size_t threads,
+                            AnofoxMlBytes *out);
+
 // Whether `kind` fits on unlabelled rows (semi-supervised kinds): ml_fit_agg
 // then passes rows with a NULL target as y = -1, or as a NULL label.
 bool anofox_ml_accepts_unlabelled(const char *kind);

@@ -616,3 +616,45 @@ SELECT pi.lower < 10 AND pi.upper > 10 FROM (SELECT ml_predict_interval(ml_fit_a
     '{"estimator": "PerpetualRegressor", "alpha": 0.1}'), [3.0, 4.0], 0.1) AS pi FROM pb);
 ----
 true
+
+# partial_fit (anofox-ml 0.5): two batches give the same model as one fit
+statement ok
+CREATE TABLE pf AS SELECT i, [(hash(i) % 1000) / 100.0, (hash(i, 'b') % 1000) / 100.0] AS x,
+    CASE WHEN (hash(i) % 1000) / 100.0 > 5 THEN 'hi' ELSE 'lo' END AS lab FROM range(400) t(i);
+
+query I
+WITH m1 AS (SELECT ml_fit_agg('GaussianNB', lab, x) AS m FROM pf WHERE i < 200),
+     m2 AS (SELECT ml_partial_fit_agg(m, lab, x) AS m FROM pf, m1 WHERE i >= 200 GROUP BY m),
+     mf AS (SELECT ml_fit_agg('GaussianNB', lab, x) AS m FROM pf)
+SELECT max(abs(ml_predict_proba(m2.m, x)[1] - ml_predict_proba(mf.m, x)[1])) < 1e-9 FROM pf, m2, mf;
+----
+true
+
+query I
+WITH m1 AS (SELECT ml_fit_agg('StandardScaler', x) AS m FROM pf WHERE i < 150),
+     m2 AS (SELECT ml_partial_fit_agg(m, x) AS m FROM pf, m1 WHERE i >= 150 GROUP BY m),
+     mf AS (SELECT ml_fit_agg('StandardScaler', x) AS m FROM pf)
+SELECT max(abs(ml_transform(m2.m, x)[2] - ml_transform(mf.m, x)[2])) < 1e-9 FROM pf, m2, mf;
+----
+true
+
+query I
+SELECT ml_predict_label(ml_partial_fit_agg(m, lab, x), [9.0, 1.0]) FROM pf, (SELECT ml_fit_agg('SgdClassifier', lab, x) AS m FROM pf WHERE i < 200) GROUP BY m;
+----
+hi
+
+statement error
+SELECT ml_partial_fit_agg(m, 'zebra', x) FROM pf, (SELECT ml_fit_agg('GaussianNB', lab, x) AS m FROM pf) GROUP BY m;
+----
+not a label of the model
+
+statement error
+SELECT ml_partial_fit_agg(m, x[1], x) FROM pf, (SELECT ml_fit_agg('RandomForestRegressor', x[1], x, '{"n_estimators": 3}') AS m FROM pf) GROUP BY m;
+----
+does not support partial_fit
+
+# MLP warm start (anofox-ml 0.5) through ml_warm_start_agg
+query I
+SELECT ml_model_info(ml_warm_start_agg(m, x[1] + x[2], x)).kind FROM pf, (SELECT ml_fit_agg('MlpRegressor', x[1] + x[2], x, '{"max_iter": 20}') AS m FROM pf) GROUP BY m;
+----
+MlpRegressor

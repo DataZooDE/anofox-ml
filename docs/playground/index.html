@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>anofox_ml playground</title>
+<meta name="description" content="Machine learning in SQL, in your browser: DuckDB-Wasm with the anofox_ml extension.">
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --ink: #1d1f23; --muted: #63676f; --line: #e2e3e6;
+    --accent: #2f6f5e; --accent-ink: #ffffff; --error: #b3261e; --code-bg: #f4f4f2;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141517; --panel: #1c1d20; --ink: #e8e9eb; --muted: #9a9ea6; --line: #2e3035;
+      --accent: #6cc3a6; --accent-ink: #0d1f19; --error: #ff8a80; --code-bg: #232428;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h1 code { font-family: var(--mono); font-size: 20px; }
+  .lede { color: var(--muted); margin: 0; flex: 1 1 320px; }
+  header a { color: var(--accent); }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  select, button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 10px; }
+  button.run { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: 0.5; }
+  .hint { color: var(--muted); font-size: 13px; }
+  textarea { width: 100%; min-height: 260px; resize: vertical; font: 13px/1.5 var(--mono); color: var(--ink);
+             background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; tab-size: 4; }
+  #status { font-size: 13px; color: var(--muted); margin: 8px 0 16px; min-height: 1.5em; }
+  #status.error { color: var(--error); white-space: pre-wrap; font-family: var(--mono); }
+  .result { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: auto; max-height: 60vh; }
+  table { border-collapse: collapse; font: 13px/1.4 var(--mono); width: max-content; min-width: 100%; }
+  th, td { padding: 6px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; white-space: pre; }
+  th { position: sticky; top: 0; background: var(--panel); font-weight: 600; }
+  td.num { text-align: right; }
+  footer { margin-top: 24px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><code>anofox_ml</code> playground</h1>
+    <p class="lede">Machine learning in SQL, running in your browser: DuckDB-Wasm with the
+      <a href="https://github.com/DataZooDE/anofox-ml">anofox_ml</a> extension. Nothing leaves this page.</p>
+  </header>
+
+  <div class="bar">
+    <label for="example" class="hint">Example</label>
+    <select id="example"></select>
+    <button id="run" class="run" disabled>Run</button>
+    <span class="hint">Ctrl / ⌘ + Enter</span>
+  </div>
+  <textarea id="sql" spellcheck="false" aria-label="SQL"></textarea>
+  <div id="status" role="status">Loading DuckDB-Wasm…</div>
+  <div class="result" id="result" hidden></div>
+
+  <footer>Everything runs on one thread in the browser, so large fits are slower than natively.
+    <span id="versions"></span></footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

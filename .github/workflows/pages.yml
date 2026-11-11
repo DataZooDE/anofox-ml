@@ -1,0 +1,68 @@
+#
+# The browser playground (docs/playground) on GitHub Pages, with the wasm
+# builds of a release next to it under ext/<duckdb version>/<platform>/, the
+# layout DuckDB-Wasm requests for `INSTALL anofox_ml FROM '<page>/ext'` (#88).
+# Called by the release job of MainDistributionPipeline.yml (a release made
+# with GITHUB_TOKEN does not trigger other workflows), or by hand for a tag.
+#
+name: Playground
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag whose wasm builds the page serves (default: the latest release)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy the playground
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          [ -n "$TAG" ] || TAG=$(gh release view --json tagName -q .tagName)
+          echo "Serving the wasm builds of $TAG"
+          mkdir -p site dl
+          cp docs/playground/* site/
+          gh release download "$TAG" -D dl -p '*-wasm_eh.zip' -p '*-wasm_threads.zip' -p '*-wasm_mvp.zip'
+          for zip in dl/*.zip; do
+            name=$(basename "$zip" .zip)       # anofox_ml-<tag>-duckdb-<version>-<platform>
+            platform=${name##*-}
+            version=${name#*-duckdb-}; version=${version%-*}
+            mkdir -p "site/ext/$version/$platform"
+            unzip -q "$zip" -d "site/ext/$version/$platform"
+          done
+          find site -type f | sort
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

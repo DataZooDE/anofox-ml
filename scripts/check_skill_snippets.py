@@ -4,7 +4,8 @@ against the built extension.
 
 - Every ```sql block runs in a fresh in-memory database after
   scripts/skill_snippets/fixtures.sql, with ./build/release/duckdb. A block
-  whose first line is `-- synopsis` is a signature sketch and is not run.
+  whose first line is `-- synopsis` is a signature sketch, and one with an
+  INSTALL needs the network: neither is run.
 - Every `ml_*` name mentioned anywhere in a SKILL.md must be a registered
   function, and every kind named in a ml_*(...'Kind'...) call or in backticks
   must be a row of ml_estimators() (names in NOT_KINDS excepted).
@@ -77,7 +78,8 @@ def main() -> int:
         for m in re.finditer(r"```sql\n(.*?)```", text, re.S):
             block = m.group(1)
             line = text[: m.start()].count("\n") + 2
-            if block.lstrip().lower().startswith("-- synopsis"):
+            # Signature sketches, and blocks that need the network (INSTALL).
+            if block.lstrip().lower().startswith("-- synopsis") or re.search(r"^\s*INSTALL\b", block, re.M | re.I):
                 continue
             ok, out = run(FIXTURES + "\n" + block)
             if ok:

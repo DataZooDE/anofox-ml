@@ -178,7 +178,8 @@ jobs:
         run: |
           npm --prefix test/wasm ci
           npm --prefix test/wasm install --no-save @duckdb/duckdb-wasm@1.33.1-dev114.0
-          npx --prefix test/wasm playwright install --with-deps chromium
+          # apt mirrors / DNS on the runners flake now and then: retry
+          for i in 1 2 3; do npx --prefix test/wasm playwright install --with-deps chromium && break; [ $i = 3 ] && exit 1; sleep 30; done
 
       - name: Run test/sql in Chromium
         run: node test/wasm/browser.mjs --ext wasm-artifact/anofox_ml.duckdb_extension.wasm

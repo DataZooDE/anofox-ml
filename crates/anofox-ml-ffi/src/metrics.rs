@@ -301,7 +301,7 @@ pub unsafe extern "C" fn anofox_ml_metric(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while computing a metric"),
+        Err(p) => err(crate::panic_message("while computing a metric", p)),
     }
 }
 
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn anofox_ml_metric_labels(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while computing a metric"),
+        Err(p) => err(crate::panic_message("while computing a metric", p)),
     }
 }
 

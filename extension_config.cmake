@@ -38,6 +38,11 @@ elseif("${DUCKDB_EXPLICIT_PLATFORM}" STREQUAL "wasm_mvp")
 elseif("${DUCKDB_EXPLICIT_PLATFORM}" STREQUAL "wasm_threads")
     set(ANOFOX_ML_WASM_FEATURES "atomics,bulk-memory,exception-handling,multivalue,mutable-globals,nontrapping-fptoint,reference-types,sign-ext")
 endif()
+# Only emsdk 3.x needs this; the DuckDB 2.0 wasm builds use emsdk 6, whose
+# binaryen knows those features.
+if(DEFINED EMSCRIPTEN_VERSION AND NOT EMSCRIPTEN_VERSION VERSION_LESS "4.0")
+    set(ANOFOX_ML_WASM_FEATURES "")
+endif()
 if(NOT ANOFOX_ML_WASM_FEATURES STREQUAL "")
     string(APPEND ANOFOX_ML_LINKED_LIBS " -Xlinker --no-check-features -Xlinker --features=${ANOFOX_ML_WASM_FEATURES}")
 endif()

@@ -1,0 +1,15 @@
+{
+  "name": "anofox-ml-wasm-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DuckDB-Wasm load + runtime harness for the anofox_ml extension.",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "comment": "1.33.1-dev65.0 bundles DuckDB v1.5.6, the engine of the wasm builds (pinned as in anofox-forecast).",
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "1.33.1-dev65.0",
+    "web-worker": "1.2.0"
+  }
+}

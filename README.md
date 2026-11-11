@@ -87,7 +87,11 @@ LOAD './anofox_ml.duckdb_extension';
 SELECT ml_version();
 ```
 
-The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R. `SHA256SUMS` in the release lists the checksums. DuckDB-Wasm builds (`wasm_mvp`, `wasm_eh`, `wasm_threads`, DuckDB 1.5.6) ship as `anofox_ml.duckdb_extension.wasm` in the same kind of zip. Changes per version are in [CHANGELOG.md](CHANGELOG.md).
+The setting can only be given when the database is opened, e.g. `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python or `dbConnect(duckdb(config = list(allow_unsigned_extensions = "true")))` in R. `SHA256SUMS` in the release lists the checksums. DuckDB-Wasm builds (`wasm_mvp`, `wasm_eh`, `wasm_threads`, for DuckDB 1.5.6 and 2.0.0) ship as `anofox_ml.duckdb_extension.wasm` in the same kind of zip. Changes per version are in [CHANGELOG.md](CHANGELOG.md).
+
+### DuckDB-Wasm
+
+The extension runs in the browser too. CI loads the `wasm_eh` and `wasm_mvp` builds in DuckDB-Wasm and runs the SQL test suite there (`test/wasm`). In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
 
 ### From Source
 

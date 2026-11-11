@@ -121,7 +121,7 @@ pub unsafe extern "C" fn anofox_ml_multiple_impute(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while imputing"),
+        Err(p) => err(crate::panic_message("while imputing", p)),
     }
 }
 

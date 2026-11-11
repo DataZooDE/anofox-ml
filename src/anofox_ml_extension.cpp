@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "include/anofox_ml_extension.hpp"
+#include "include/anofox_ml_ffi.h"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -60,6 +61,7 @@ static void RegisterTelemetryOptions(ExtensionLoader &loader) {
 #endif // ANOFOX_TELEMETRY_ENABLED
 
 void LoadInternal(ExtensionLoader &loader) {
+    anofox_ml_init();
     auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
     config.AddExtensionOption("anofox_ml_max_fit_values",
                               "Largest training set (rows x features) one fitting aggregate may hold in memory per "

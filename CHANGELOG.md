@@ -4,13 +4,19 @@
 
 Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/sipemu/anofox-ml) **0.5** from crates.io. This is the version submitted as a DuckDB community extension (#4). The release binaries are unsigned; see [Installation](https://github.com/DataZooDE/anofox-ml#installation).
 
+### Fixed
+- DuckDB-Wasm: fits and predictions work. The wasm builds loaded, but every fit and prediction failed, because DuckDB-Wasm cannot start the threads of the extension's thread pools; they now run on the current thread there (#84).
+
 ### Changed
+- Errors from a panic caught in the Rust core include the panic message.
+- `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds: the perpetual crate starts its own threads on every fit (#84).
 - `ml_inverse_transform` no longer rejects inputs of the transformed width (PCA components, one-hot columns); the model checks the width itself (#11).
 - anofox-ml 0.5: 188 estimator kinds (from 144), among them voting / stacking / calibration / transformed-target / multi-output meta-estimators, Gaussian processes, PLS / CCA, multi-task lasso, LARS CV, text vectorizers and more. Stored models from 0.2 and 0.4 load and predict identically. `ml_predict_log_proba` is native where the estimator has it (finite where probabilities underflow).
 - Building from source needs Rust 1.88 (was 1.87), for the PerpetualBooster kinds (#47).
 
 ### Added
 - Claude Code plugin with four skills (`anofox-ml-modeling`, `-features`, `-evaluation`, `-advanced`): `/plugin marketplace add DataZooDE/anofox-ml`. `make check_skills` runs every SQL example in them against the built extension.
+- DuckDB-Wasm: CI runs the SQL tests in DuckDB-Wasm (`test/wasm`, `wasm_eh` and `wasm_mvp`), and the wasm builds cover DuckDB 2.0 as well. WASM builds pin their Rust toolchain in CMake, so the community-extensions CI builds them too (#84).
 - `ml_tune_agg` with `search: "tpe"`: Bayesian optimisation with a tree-structured Parzen estimator (Optuna's univariate TPE), seeded and thread-count independent (#5).
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
 - Text vectorizers on `VARCHAR` documents: `ml_fit_agg(kind, text [, params])` for `CountVectorizer`, `TfidfVectorizer` and `HashingVectorizer`, and `ml_transform(model, text)`, matching scikit-learn (#14).

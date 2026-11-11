@@ -525,7 +525,7 @@ pub unsafe extern "C" fn anofox_ml_tune(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while tuning"),
+        Err(p) => err(crate::panic_message("while tuning", p)),
     }
 }
 

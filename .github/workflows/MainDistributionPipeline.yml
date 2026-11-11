@@ -35,8 +35,7 @@ jobs:
       extension_name: anofox_ml
       enable_rust: true
       reduced_ci_mode: disabled
-      # DuckDB-Wasm builds come from the wasm job (DuckDB 1.5.6 only).
-      exclude_archs: "wasm_mvp;wasm_eh;wasm_threads"
+      # The wasm builds use its emsdk 6 and the Rust pinned in CMakeLists.txt.
 
   # DuckDB-Wasm builds: extension-ci-tools' wasm job with a current Rust
   # toolchain instead of its pinned 1.86 (DataZooDE/anofox-ml#29).
@@ -109,6 +108,52 @@ jobs:
           name: anofox_ml-v1.5.6-extension-${{ matrix.duckdb_arch }}
           path: build/${{ matrix.duckdb_arch }}/extension/anofox_ml/anofox_ml.duckdb_extension.wasm
 
+  # Load the wasm builds in DuckDB-Wasm (Node) and run test/sql there: the
+  # import check above cannot see runtime failures (#84). wasm_threads needs
+  # a cross-origin-isolated browser, so it is only checked statically; the
+  # DuckDB 2.0 npm builds have one single-threaded bundle (base), as wasm_eh.
+  wasm-runtime:
+    name: DuckDB-Wasm runtime (${{ matrix.duckdb }}, ${{ matrix.duckdb_arch }})
+    needs: [wasm, duckdb-2-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - duckdb: v1.5.6
+            duckdb_arch: wasm_eh
+            bundle: eh
+            duckdb_wasm: 1.33.1-dev65.0
+          - duckdb: v1.5.6
+            duckdb_arch: wasm_mvp
+            bundle: mvp
+            duckdb_wasm: 1.33.1-dev65.0
+          - duckdb: v2.0.0
+            duckdb_arch: wasm_eh
+            bundle: base
+            duckdb_wasm: 1.33.1-dev114.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: anofox_ml-${{ matrix.duckdb }}-extension-${{ matrix.duckdb_arch }}
+          path: wasm-artifact
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # @duckdb/duckdb-wasm 1.33.1-dev65.0 bundles DuckDB v1.5.6, dev114.0 v2.0.0.
+      - name: Install the harness
+        run: |
+          npm --prefix test/wasm ci
+          npm --prefix test/wasm install --no-save @duckdb/duckdb-wasm@${{ matrix.duckdb_wasm }}
+
+      - name: Run test/sql in DuckDB-Wasm
+        run: node test/wasm/run.mjs --bundle ${{ matrix.bundle }} --ext wasm-artifact/anofox_ml.duckdb_extension.wasm
+
   build-and-test-rust:
     name: Build and test Rust components
     runs-on: ubuntu-24.04
@@ -155,7 +200,7 @@ jobs:
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [duckdb-stable-build, duckdb-2-build, wasm, build-and-test-rust]
+    needs: [duckdb-stable-build, duckdb-2-build, wasm, wasm-runtime, build-and-test-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: write

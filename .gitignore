@@ -4,3 +4,4 @@ duckdb_unittest_tempdir/
 .vscode
 *.log
 .cache/
+test/wasm/node_modules/

@@ -12,8 +12,9 @@
 // state of memory"; duckdb/extension-ci-tools#453, duckdb/duckdb-wasm#2041).
 //
 // Usage: node browser.mjs --ext <anofox_ml.duckdb_extension.wasm> [--threads] [file.test ...]
-// Needs @duckdb/duckdb-wasm 1.33.1-dev114.0 (DuckDB 2.0) in node_modules and
-// `npx playwright install chromium`.
+// Needs @duckdb/duckdb-wasm 1.33.1-dev114.0 (DuckDB 2.0) in node_modules, and
+// Playwright's Chromium (`npx playwright install chromium`) or, with
+// PLAYWRIGHT_CHANNEL=chrome, an installed Google Chrome (CI: the runner's).
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -66,7 +67,7 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://127.0.0.1:${server.address().port}`;
 
-const browser = await chromium.launch();
+const browser = await chromium.launch(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {});
 let failed = false;
 try {
   const page = await browser.newPage();

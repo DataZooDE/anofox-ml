@@ -11,6 +11,7 @@
   <a href="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=main" alt="Build"></a>
   <img src="https://img.shields.io/badge/estimators-188-brightgreen.svg" alt="188 estimators">
   <a href="#-claude-code-skills"><img src="https://img.shields.io/badge/Claude_Code-AI_skills_plugin-8A2BE2" alt="Claude Code plugin"></a>
+  <a href="https://datazoode.github.io/anofox-ml/"><img src="https://img.shields.io/badge/try_it-in_your_browser-2f6f5e" alt="Try it in your browser"></a>
   <img src="https://img.shields.io/badge/status-early%20development-orange.svg" alt="Status: early development">
 </p>
 
@@ -91,7 +92,7 @@ The setting can only be given when the database is opened, e.g. `duckdb.connect(
 
 ### DuckDB-Wasm
 
-The extension runs in the browser too. CI loads the `wasm_eh` builds for DuckDB 1.5.6 and 2.0 in DuckDB-Wasm and runs the SQL test suite there (`test/wasm`); `wasm_mvp` and `wasm_threads` are built and checked statically. In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
+The extension runs in the browser too: **[try it in the playground](https://datazoode.github.io/anofox-ml/)**, DuckDB-Wasm with anofox_ml and example queries, nothing to install. CI loads the `wasm_eh` builds for DuckDB 1.5.6 and 2.0 in DuckDB-Wasm and runs the SQL test suite there (`test/wasm`); `wasm_mvp` and `wasm_threads` are built and checked statically. In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
 
 ### From Source
 

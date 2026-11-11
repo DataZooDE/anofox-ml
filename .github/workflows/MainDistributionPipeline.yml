@@ -112,8 +112,8 @@ jobs:
   # import check above cannot see runtime failures (#84). Checked statically
   # only: wasm_threads (needs a cross-origin-isolated browser) and wasm_mvp
   # (the npm mvp bundle fails on any C++ exception, "_setThrew is not
-  # defined", even without an extension). The DuckDB 2.0 npm builds have one
-  # single-threaded bundle (base), as wasm_eh.
+  # defined", even without an extension; duckdb/duckdb-wasm#2267). The
+  # DuckDB 2.0 npm builds have one single-threaded bundle (base), as wasm_eh.
   wasm-runtime:
     name: DuckDB-Wasm runtime (${{ matrix.duckdb }}, ${{ matrix.duckdb_arch }})
     needs: [wasm, duckdb-2-build]

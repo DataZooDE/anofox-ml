@@ -429,7 +429,8 @@ fn make_model(kind: &str, params: &str) -> Result<Box<dyn DynModel>, String> {
     {
         return Err(
             "PerpetualRegressor / PerpetualClassifier are not available in DuckDB-Wasm: \
-             the perpetual crate needs threads (use HistGradientBoosting* instead)"
+             the perpetual crate needs threads (perpetual-ml/perpetual#95; use \
+             HistGradientBoosting* instead)"
                 .into(),
         );
     }

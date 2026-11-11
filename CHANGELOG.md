@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - 2026-11-10
+## [0.2.0] - 2026-11-11
 
 Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/sipemu/anofox-ml) **0.5** from crates.io. This is the version submitted as a DuckDB community extension (#4). The release binaries are unsigned; see [Installation](https://github.com/DataZooDE/anofox-ml#installation).
 

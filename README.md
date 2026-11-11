@@ -91,7 +91,7 @@ The setting can only be given when the database is opened, e.g. `duckdb.connect(
 
 ### DuckDB-Wasm
 
-The extension runs in the browser too. CI loads the `wasm_eh` and `wasm_mvp` builds in DuckDB-Wasm and runs the SQL test suite there (`test/wasm`). In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
+The extension runs in the browser too. CI loads the `wasm_eh` builds for DuckDB 1.5.6 and 2.0 in DuckDB-Wasm and runs the SQL test suite there (`test/wasm`); `wasm_mvp` and `wasm_threads` are built and checked statically. In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
 
 ### From Source
 

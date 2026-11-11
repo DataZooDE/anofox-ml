@@ -16,7 +16,7 @@ Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/
 
 ### Added
 - Claude Code plugin with four skills (`anofox-ml-modeling`, `-features`, `-evaluation`, `-advanced`): `/plugin marketplace add DataZooDE/anofox-ml`. `make check_skills` runs every SQL example in them against the built extension.
-- DuckDB-Wasm: CI runs the SQL tests in DuckDB-Wasm (`test/wasm`, `wasm_eh` and `wasm_mvp`), and the wasm builds cover DuckDB 2.0 as well. WASM builds pin their Rust toolchain in CMake, so the community-extensions CI builds them too (#84).
+- DuckDB-Wasm: CI runs the SQL tests in DuckDB-Wasm (`test/wasm`; `wasm_eh` on DuckDB 1.5.6 and 2.0), and the wasm builds cover DuckDB 2.0 as well. WASM builds pin their Rust toolchain in CMake, so the community-extensions CI builds them too (#84).
 - `ml_tune_agg` with `search: "tpe"`: Bayesian optimisation with a tree-structured Parzen estimator (Optuna's univariate TPE), seeded and thread-count independent (#5).
 - DuckDB-Wasm: the wasm builds link the Rust core (the 0.1.0 wasm builds didn't load) and releases attach them again; CI checks the module has no unresolved FFI imports (#29).
 - Text vectorizers on `VARCHAR` documents: `ml_fit_agg(kind, text [, params])` for `CountVectorizer`, `TfidfVectorizer` and `HashingVectorizer`, and `ml_transform(model, text)`, matching scikit-learn (#14).

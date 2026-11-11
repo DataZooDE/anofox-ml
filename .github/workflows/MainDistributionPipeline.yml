@@ -109,9 +109,11 @@ jobs:
           path: build/${{ matrix.duckdb_arch }}/extension/anofox_ml/anofox_ml.duckdb_extension.wasm
 
   # Load the wasm builds in DuckDB-Wasm (Node) and run test/sql there: the
-  # import check above cannot see runtime failures (#84). wasm_threads needs
-  # a cross-origin-isolated browser, so it is only checked statically; the
-  # DuckDB 2.0 npm builds have one single-threaded bundle (base), as wasm_eh.
+  # import check above cannot see runtime failures (#84). Checked statically
+  # only: wasm_threads (needs a cross-origin-isolated browser) and wasm_mvp
+  # (the npm mvp bundle fails on any C++ exception, "_setThrew is not
+  # defined", even without an extension). The DuckDB 2.0 npm builds have one
+  # single-threaded bundle (base), as wasm_eh.
   wasm-runtime:
     name: DuckDB-Wasm runtime (${{ matrix.duckdb }}, ${{ matrix.duckdb_arch }})
     needs: [wasm, duckdb-2-build]
@@ -124,10 +126,6 @@ jobs:
           - duckdb: v1.5.6
             duckdb_arch: wasm_eh
             bundle: eh
-            duckdb_wasm: 1.33.1-dev65.0
-          - duckdb: v1.5.6
-            duckdb_arch: wasm_mvp
-            bundle: mvp
             duckdb_wasm: 1.33.1-dev65.0
           - duckdb: v2.0.0
             duckdb_arch: wasm_eh

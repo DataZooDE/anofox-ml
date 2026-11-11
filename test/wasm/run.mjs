@@ -94,9 +94,11 @@ async function main() {
     const failedFiles = [];
     for (const rel of files) {
       if (SKIP_FILES.has(rel)) { log(`  ⊘ ${rel}: skipped (${SKIP_FILES.get(rel)})`); continue; }
-      // A fresh catalog per file, as sqllogictest does.
+      // A fresh catalog per file, as sqllogictest does. DuckDB-Wasm 2.0
+      // forgets the installed copy on re-open, so install it again.
       await engine.db.open({ allowUnsignedExtensions: true });
       conn = await engine.db.connect();
+      await conn.query(`FORCE INSTALL ${EXT_NAME} FROM 'http://127.0.0.1:${port}'`);
       await conn.query(`LOAD ${EXT_NAME}`);
       const r = await runRecords(parseTest(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8')), rowsOf(conn), { file: rel, log });
       await conn.close();

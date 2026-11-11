@@ -94,8 +94,8 @@ SELECT d AS dow, ml_predict(gp, [d]) AS mean, ml_predict_std(gp, [d]) AS sd FROM
 `reference` / `analysis` / `source` are table names as strings. To see which features drift, fit a classifier on reference vs. the drifted chunk and read `ml_feature_importances`.
 
 ```sql
-CREATE TABLE events AS SELECT id, 'w' || (day // 200) AS week, price + CASE WHEN day >= 800 THEN 0.5 ELSE 0 END AS price, dow FROM sales;
-SELECT chunk, round(auc, 2) AS auc, drifted FROM ml_domain_classifier_drift_by('events', week, id, [price, dow], 'w0') ORDER BY chunk;
+CREATE TABLE weekly AS SELECT id, 'w' || (day // 200) AS week, price + CASE WHEN day >= 800 THEN 0.5 ELSE 0 END AS price, dow FROM sales;
+SELECT chunk, round(auc, 2) AS auc, drifted FROM ml_domain_classifier_drift_by('weekly', week, id, [price, dow], 'w0') ORDER BY chunk;
 ```
 
 ```sql

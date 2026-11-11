@@ -19,7 +19,7 @@ rust_debug:
 rust_test:
 	cargo test
 
-# Run every SQL example of the Claude Code skills against build/release/duckdb
+# Run every SQL example of README.md and the Claude Code skills against build/release/duckdb
 check_skills:
 	python3 scripts/check_skill_snippets.py
 

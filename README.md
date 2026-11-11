@@ -362,7 +362,7 @@ SELECT ml_coverage(y, pi90.lower, pi90.upper), ml_interval_score(y, pi90.lower, 
 FROM (SELECT y, ml_predict_interval(m, [x1, x2], 0.1) AS pi90 FROM test, calibrated);
 
 -- or in one step: CV+ intervals around gradient boosting, one model per store
-CREATE TABLE models AS
+CREATE TABLE cv_models AS
 SELECT store, ml_fit_agg('CrossConformalRegressor', y, [x1, x2],
        '{"estimator": "HistGradientBoostingRegressor", "estimator_params": {"n_estimators": 200}, "cv": 5}') AS m
 FROM train GROUP BY store;
@@ -525,13 +525,14 @@ FROM readings r JOIN m USING (sensor);
 **Densities and robust outliers.** `KernelDensity` and `FactorAnalysis` give per-row log-likelihoods through `ml_score_samples`. `EllipticEnvelope` (robust covariance) scores rows with `ml_outlier_score_agg` like the other detectors (lower = more anomalous):
 
 ```sql
-SELECT ml_score_samples(ml_fit_agg('KernelDensity', [a, b], '{"bandwidth": {"Fixed": 1.0}}'), [5.0, 5.0]);
+SELECT ml_score_samples(ml_fit_agg('KernelDensity', [a, b], '{"bandwidth": {"Fixed": 1.0}}'), [1.0, 3.0]) FROM train;
 ```
 
 **Learning curves and early stopping.** `ml_staged_predict` scores every boosting stage at once. `ml_fit_with_validation_agg` stops on a validation set you choose, for example the last weeks of a series instead of a random split:
 
 ```sql
 -- validation RMSE per stage
+CREATE TABLE model AS SELECT ml_fit_agg('HistGradientBoostingRegressor', y, [x1, x2], '{"n_estimators": 200}') AS m FROM train;
 SELECT stage, ml_rmse(y, p[stage]) AS rmse
 FROM (SELECT y, ml_staged_predict(m, [x1, x2]) AS p FROM test, model), range(1, 201) r(stage)
 GROUP BY stage ORDER BY stage;
@@ -546,7 +547,7 @@ FROM (SELECT *, max(day) OVER (PARTITION BY store) AS max_day FROM sales) GROUP 
 
 ```sql
 UPDATE models SET model = w.model
-FROM (SELECT store, ml_warm_start_agg(m.model, units, [price, dow], '{"n_estimators": 300}') AS model
+FROM (SELECT store, ml_warm_start_agg(m.model, units, [price, promo, dow], '{"n_estimators": 300}') AS model
       FROM new_rows JOIN models m USING (store) GROUP BY store, m.model) w
 WHERE models.store = w.store;
 ```
@@ -714,7 +715,7 @@ make test                         # SQL logic tests in test/sql
 cargo test                        # Rust FFI tests
 cargo fmt --all                   # format
 cargo clippy --all-targets        # lint
-make check_skills                 # run the skills' SQL examples
+make check_skills                 # run the SQL examples of this README and the skills
 ```
 
 ### Layout

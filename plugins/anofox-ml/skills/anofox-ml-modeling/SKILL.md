@@ -37,13 +37,13 @@ ml_fit_agg(kind, [x1, x2, …] [, params JSON [, weight]])      -- unsupervised 
 
 ```sql
 -- one model per store, kept in a table
-CREATE TABLE models AS
+CREATE TABLE store_models AS
 SELECT store, ml_fit_agg('HistGradientBoostingRegressor', units, [price, promo, dow],
                          '{"n_estimators": 200, "learning_rate": 0.05}') AS model
 FROM train GROUP BY store;
 
 SELECT store, ml_rmse(units, ml_predict(model, [price, promo, dow])) AS rmse
-FROM test JOIN models USING (store) GROUP BY store ORDER BY store;
+FROM test JOIN store_models USING (store) GROUP BY store ORDER BY store;
 ```
 
 ```sql

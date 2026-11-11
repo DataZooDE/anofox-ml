@@ -138,4 +138,5 @@ GROUP BY store ORDER BY store;
 - Per-row aggregates (`ml_cluster_agg`, `ml_fit_transform_agg`, …) and `ml_kneighbors` indices follow input order: put `ORDER BY id` inside the aggregate.
 - A fitting aggregate holds its group in memory; `SET anofox_ml_max_fit_values = n` caps rows × features per group (default 100 million, `0` = off). Sample huge groups with `USING SAMPLE`.
 - BLOBs from older versions keep predicting the same after an upgrade; refitting may differ where a kind's training changed.
+- DuckDB-Wasm (browser): the same SQL works, single-threaded and within the tab's memory; `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds (use `HistGradientBoosting*`).
 - Categorical and text inputs, clustering and decomposition: the features skill. Metrics, CV, tuning, conformal intervals: the evaluation skill. Ensembles, offsets, multi-target, drift: the advanced skill.

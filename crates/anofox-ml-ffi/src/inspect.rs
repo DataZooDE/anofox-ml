@@ -173,7 +173,7 @@ pub unsafe extern "C" fn anofox_ml_permutation_importance(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while computing importances"),
+        Err(p) => err(crate::panic_message("while computing importances", p)),
     }
 }
 

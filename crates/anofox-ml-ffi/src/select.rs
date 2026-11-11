@@ -185,7 +185,7 @@ pub unsafe extern "C" fn anofox_ml_rfe(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) during feature elimination"),
+        Err(p) => err(crate::panic_message("during feature elimination", p)),
     }
 }
 

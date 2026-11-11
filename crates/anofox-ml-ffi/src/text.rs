@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::{
     encode_fitted, err, flatten, make_model, require_method, run_fit, str_arg, strings, with_model,
-    AnofoxMlBytes, AnofoxMlDoubles, POOL,
+    AnofoxMlBytes, AnofoxMlDoubles,
 };
 
 #[derive(Deserialize, Default)]
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn anofox_ml_hashing_vectorize(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while hashing"),
+        Err(p) => err(crate::panic_message("while hashing", p)),
     }
 }
 
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn anofox_ml_fit_text(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting"),
+        Err(p) => err(crate::panic_message("while fitting", p)),
     }
 }
 
@@ -178,9 +178,8 @@ pub unsafe extern "C" fn anofox_ml_transform_text(
         let docs = strings(docs, n_docs, "document")?;
         with_model(blob, |meta, model| {
             require_method(&meta.kind, model, "transform_text")?;
-            let out = POOL
-                .with(|p| p.install(|| model.transform_text(&docs)))
-                .map_err(|e| e.to_string())?;
+            let out =
+                crate::on_worker(|| model.transform_text(&docs)).map_err(|e| e.to_string())?;
             Ok(flatten(out))
         })
     };
@@ -191,7 +190,7 @@ pub unsafe extern "C" fn anofox_ml_transform_text(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while encoding documents"),
+        Err(p) => err(crate::panic_message("while encoding documents", p)),
     }
 }
 

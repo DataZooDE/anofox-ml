@@ -233,11 +233,45 @@ fn shared_pool(threads: usize) -> Result<std::sync::Arc<rayon::ThreadPool>, Stri
 
 /// Run a fit with up to `threads` threads.
 fn run_fit<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> Result<T, String> {
-    if threads <= 1 {
-        Ok(POOL.with(|p| p.install(f)))
+    if threads <= 1 || cfg!(target_family = "wasm") {
+        Ok(on_worker(f))
     } else {
         Ok(shared_pool(threads)?.install(f))
     }
+}
+
+/// Run `f` on this thread's one-thread pool. DuckDB-Wasm cannot spawn
+/// threads, so building a pool panics there (#84): `f` runs on the current
+/// thread, and rayon's global pool (which the estimators' `par_iter`s use)
+/// is made of the current thread alone when spawning fails.
+pub(crate) fn on_worker<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    if cfg!(target_family = "wasm") {
+        init_wasm_global_pool();
+        f()
+    } else {
+        POOL.with(|p| p.install(f))
+    }
+}
+
+/// rayon falls back to the current thread only when spawning is
+/// "unsupported", but Emscripten without pthreads fails with EAGAIN, so the
+/// global pool would panic on first use. The global pool can be set up only
+/// once (a failed attempt counts), so probe for threads first.
+fn init_wasm_global_pool() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let threads = std::thread::Builder::new()
+            .spawn(|| {})
+            .is_ok_and(|h| h.join().is_ok());
+        let builder = if threads {
+            rayon::ThreadPoolBuilder::new()
+        } else {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .use_current_thread()
+        };
+        let _ = builder.build_global();
+    });
 }
 
 thread_local! {
@@ -250,6 +284,18 @@ thread_local! {
     /// Last decoded model of this thread, keyed by a hash of its BLOB, so
     /// predicting row by row does not decode the model every time.
     static CACHE: RefCell<CachedModel> = const { RefCell::new(None) };
+}
+
+/// The error for a panic caught at the C boundary, with its message.
+pub(crate) fn panic_message(what: &str, payload: Box<dyn std::any::Any + Send>) -> String {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned());
+    match msg {
+        Some(m) => format!("internal error (panic) {what}: {m}"),
+        None => format!("internal error (panic) {what}"),
+    }
 }
 
 fn err(msg: impl std::fmt::Display) -> *mut c_char {
@@ -378,6 +424,15 @@ fn make_model(kind: &str, params: &str) -> Result<Box<dyn DynModel>, String> {
     } else {
         serde_json::from_str(params).map_err(|e| format!("invalid params JSON: {e}"))?
     };
+    if cfg!(target_family = "wasm")
+        && (kind.starts_with("Perpetual") || params.to_string().contains("\"Perpetual"))
+    {
+        return Err(
+            "PerpetualRegressor / PerpetualClassifier are not available in DuckDB-Wasm: \
+             the perpetual crate needs threads (use HistGradientBoosting* instead)"
+                .into(),
+        );
+    }
     anofox_ml_registry::make(kind, &params).map_err(|e| e.to_string())
 }
 
@@ -395,32 +450,30 @@ fn run_method(
     method: &str,
     x: ArrayView2<f64>,
 ) -> Result<(Vec<f64>, usize), String> {
-    let out = POOL.with(|p| {
-        p.install(|| match method {
-            "predict" => model.predict(x),
-            "predict_std" => model.predict_std(x),
-            "predict_proba" => model.predict_proba(x),
-            // Native where the estimator has it (finite where predict_proba
-            // underflows); otherwise ln of the probabilities (0 gives -inf).
-            "predict_log_proba" if model.capabilities().contains(&"predict_log_proba") => {
-                model.predict_log_proba(x)
-            }
-            "predict_log_proba" => model.predict_proba(x).map(|o| match o {
-                Out::A1(a) => Out::A1(a.mapv(f64::ln)),
-                Out::A2(a) => Out::A2(a.mapv(f64::ln)),
-            }),
-            "decision_function" => model.decision_function(x),
-            "transform" => model.transform(x),
-            "transform_y" => model.transform_y(x),
-            "inverse_transform" => model.inverse_transform(x),
-            "score_samples" => model.score_samples(x),
-            "staged_predict" => model.staged_predict(x),
-            "labels" => model.labels(),
-            "embedding" => model.embedding(),
-            _ => Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
-                "unknown method '{method}'"
-            ))),
-        })
+    let out = on_worker(|| match method {
+        "predict" => model.predict(x),
+        "predict_std" => model.predict_std(x),
+        "predict_proba" => model.predict_proba(x),
+        // Native where the estimator has it (finite where predict_proba
+        // underflows); otherwise ln of the probabilities (0 gives -inf).
+        "predict_log_proba" if model.capabilities().contains(&"predict_log_proba") => {
+            model.predict_log_proba(x)
+        }
+        "predict_log_proba" => model.predict_proba(x).map(|o| match o {
+            Out::A1(a) => Out::A1(a.mapv(f64::ln)),
+            Out::A2(a) => Out::A2(a.mapv(f64::ln)),
+        }),
+        "decision_function" => model.decision_function(x),
+        "transform" => model.transform(x),
+        "transform_y" => model.transform_y(x),
+        "inverse_transform" => model.inverse_transform(x),
+        "score_samples" => model.score_samples(x),
+        "staged_predict" => model.staged_predict(x),
+        "labels" => model.labels(),
+        "embedding" => model.embedding(),
+        _ => Err(anofox_ml_core::RustMlError::InvalidParameter(format!(
+            "unknown method '{method}'"
+        ))),
     });
     Ok(flatten(out.map_err(|e| e.to_string())?))
 }
@@ -605,7 +658,7 @@ pub unsafe extern "C" fn anofox_ml_fit_validation(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting"),
+        Err(p) => err(crate::panic_message("while fitting", p)),
     }
 }
 
@@ -673,7 +726,7 @@ pub unsafe extern "C" fn anofox_ml_fit_offset(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting"),
+        Err(p) => err(crate::panic_message("while fitting", p)),
     }
 }
 
@@ -702,9 +755,8 @@ pub unsafe extern "C" fn anofox_ml_predict_offset(
         with_model(blob, |meta, model| {
             require_method(&meta.kind, model, "predict_with_offset")?;
             check_width(meta, x)?;
-            let out = POOL
-                .with(|p| p.install(|| model.predict_with_offset(x, offset)))
-                .map_err(|e| e.to_string())?;
+            let out =
+                on_worker(|| model.predict_with_offset(x, offset)).map_err(|e| e.to_string())?;
             match flatten(out) {
                 (v, 1) => Ok(v),
                 (_, cols) => Err(format!("predict_with_offset returned {cols} columns")),
@@ -717,7 +769,7 @@ pub unsafe extern "C" fn anofox_ml_predict_offset(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while predicting"),
+        Err(p) => err(crate::panic_message("while predicting", p)),
     }
 }
 
@@ -757,8 +809,7 @@ pub unsafe extern "C" fn anofox_ml_kneighbors(
                     x.ncols()
                 ));
             }
-            let (d, i) = POOL
-                .with(|p| p.install(|| model.kneighbors(x, (k > 0).then_some(k))))
+            let (d, i) = on_worker(|| model.kneighbors(x, (k > 0).then_some(k)))
                 .map_err(|e| e.to_string())?;
             let cols = d.ncols();
             Ok((
@@ -776,7 +827,7 @@ pub unsafe extern "C" fn anofox_ml_kneighbors(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while searching neighbours"),
+        Err(p) => err(crate::panic_message("while searching neighbours", p)),
     }
 }
 
@@ -908,7 +959,7 @@ pub unsafe extern "C" fn anofox_ml_warm_start(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while warm-starting"),
+        Err(p) => err(crate::panic_message("while warm-starting", p)),
     }
 }
 
@@ -966,7 +1017,7 @@ pub unsafe extern "C" fn anofox_ml_partial_fit(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting a batch"),
+        Err(p) => err(crate::panic_message("while fitting a batch", p)),
     }
 }
 
@@ -1041,7 +1092,7 @@ pub unsafe extern "C" fn anofox_ml_fit_apply(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting"),
+        Err(p) => err(crate::panic_message("while fitting", p)),
     }
 }
 
@@ -1088,7 +1139,7 @@ pub unsafe extern "C" fn anofox_ml_fit(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting"),
+        Err(p) => err(crate::panic_message("while fitting", p)),
     }
 }
 
@@ -1145,7 +1196,7 @@ pub unsafe extern "C" fn anofox_ml_fit_labels(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while fitting"),
+        Err(p) => err(crate::panic_message("while fitting", p)),
     }
 }
 
@@ -1201,7 +1252,7 @@ pub unsafe extern "C" fn anofox_ml_predict_labels(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while predicting"),
+        Err(p) => err(crate::panic_message("while predicting", p)),
     }
 }
 
@@ -1335,7 +1386,7 @@ pub unsafe extern "C" fn anofox_ml_apply(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while predicting"),
+        Err(p) => err(crate::panic_message("while predicting", p)),
     }
 }
 
@@ -1372,7 +1423,7 @@ pub unsafe extern "C" fn anofox_ml_predict(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while predicting"),
+        Err(p) => err(crate::panic_message("while predicting", p)),
     }
 }
 
@@ -1504,7 +1555,7 @@ pub unsafe extern "C" fn anofox_ml_model_fitted(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while reading the model"),
+        Err(p) => err(crate::panic_message("while reading the model", p)),
     }
 }
 
@@ -1598,7 +1649,7 @@ pub unsafe extern "C" fn anofox_ml_model_array(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while reading the model"),
+        Err(p) => err(crate::panic_message("while reading the model", p)),
     }
 }
 
@@ -1684,7 +1735,7 @@ pub unsafe extern "C" fn anofox_ml_model_info(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while reading the model"),
+        Err(p) => err(crate::panic_message("while reading the model", p)),
     }
 }
 
@@ -1701,6 +1752,15 @@ pub unsafe extern "C" fn anofox_ml_free_model_info(info: AnofoxMlModelInfo) {
 }
 
 /// Version of this library (NUL-terminated, static).
+/// Called once when the extension loads: on wasm, set up rayon's global
+/// pool before any estimator uses it (see `init_wasm_global_pool`).
+#[no_mangle]
+pub extern "C" fn anofox_ml_init() {
+    if cfg!(target_family = "wasm") {
+        init_wasm_global_pool();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn anofox_ml_ffi_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()

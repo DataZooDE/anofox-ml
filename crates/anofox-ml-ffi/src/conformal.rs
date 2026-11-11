@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     apply_impl, decode, encode, err, flatten, into_doubles, into_strings, label_of, matrix,
-    strings, with_model, AnofoxMlBytes, AnofoxMlDoubles, AnofoxMlStrings, POOL,
+    strings, with_model, AnofoxMlBytes, AnofoxMlDoubles, AnofoxMlStrings,
 };
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
@@ -110,11 +110,9 @@ fn native(
                 x.ncols()
             ));
         }
-        let out = POOL.with(|p| {
-            p.install(|| match method {
-                "predict_interval" => model.predict_interval(x, alpha),
-                _ => model.predict_set(x, alpha),
-            })
+        let out = crate::on_worker(|| match method {
+            "predict_interval" => model.predict_interval(x, alpha),
+            _ => model.predict_set(x, alpha),
         });
         let out = out.map_err(|e| {
             format!(
@@ -176,7 +174,7 @@ pub unsafe extern "C" fn anofox_ml_conformalize(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while calibrating"),
+        Err(p) => err(crate::panic_message("while calibrating", p)),
     }
 }
 
@@ -219,7 +217,7 @@ pub unsafe extern "C" fn anofox_ml_conformalize_labels(
             anofox_ml_conformalize(model, model_len, x, n_rows, n_cols, codes.as_ptr(), out)
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while calibrating"),
+        Err(p) => err(crate::panic_message("while calibrating", p)),
     }
 }
 
@@ -257,7 +255,7 @@ pub unsafe extern "C" fn anofox_ml_predict_interval(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while predicting"),
+        Err(p) => err(crate::panic_message("while predicting", p)),
     }
 }
 
@@ -329,7 +327,7 @@ pub unsafe extern "C" fn anofox_ml_predict_set(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while predicting"),
+        Err(p) => err(crate::panic_message("while predicting", p)),
     }
 }
 

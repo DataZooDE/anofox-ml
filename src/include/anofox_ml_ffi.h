@@ -244,6 +244,9 @@ char *anofox_ml_model_kind(const uint8_t *model, size_t model_len, char **out);
 char *anofox_ml_model_fitted(const uint8_t *model, size_t model_len, char **out); // fitted state as JSON
 const char *anofox_ml_ffi_version(void);
 
+// Called once at extension load (sets up the thread pool on wasm).
+void anofox_ml_init(void);
+
 void anofox_ml_free_string(char *s);
 void anofox_ml_free_bytes(AnofoxMlBytes b);
 void anofox_ml_free_doubles(AnofoxMlDoubles d);

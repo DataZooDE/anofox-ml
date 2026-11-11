@@ -211,7 +211,7 @@ pub unsafe extern "C" fn anofox_ml_stat(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while computing a statistic"),
+        Err(p) => err(crate::panic_message("while computing a statistic", p)),
     }
 }
 
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn anofox_ml_spectral_embedding(
             std::ptr::null_mut()
         }
         Ok(Err(e)) => err(e),
-        Err(_) => err("internal error (panic) while embedding"),
+        Err(p) => err(crate::panic_message("while embedding", p)),
     }
 }
 

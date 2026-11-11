@@ -56,6 +56,33 @@ message(STATUS "Rust_CARGO_TARGET: ${Rust_CARGO_TARGET}")
 message(STATUS "OS_NAME: ${OS_NAME}")
 message(STATUS "OS_ARCH: ${OS_ARCH}")
 
+# WASM builds use a pinned Rust toolchain, installed here with rustup: the
+# wasm jobs of extension-ci-tools (and so of the community-extensions CI)
+# bring their own rustc, which for v1.5.6 is 1.86, older than the 1.88 the
+# PerpetualBooster kinds need (#84). As in anofox-forecast. Configure with
+# -DANOFOX_WASM_RUST_TOOLCHAIN= to use the default toolchain.
+set(ANOFOX_WASM_RUST_TOOLCHAIN "1.96.0" CACHE STRING
+    "Rust toolchain for WASM builds (empty: the default toolchain)")
+if(EMSCRIPTEN AND NOT "${ANOFOX_WASM_RUST_TOOLCHAIN}" STREQUAL "")
+    find_program(ANOFOX_RUSTUP rustup HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin")
+    if(NOT ANOFOX_RUSTUP)
+        message(FATAL_ERROR "rustup not found: it installs Rust ${ANOFOX_WASM_RUST_TOOLCHAIN} for the WASM build "
+                            "(or configure with -DANOFOX_WASM_RUST_TOOLCHAIN= for the default toolchain)")
+    endif()
+    # A no-op when the toolchain and target are installed already.
+    execute_process(
+        COMMAND "${ANOFOX_RUSTUP}" toolchain install "${ANOFOX_WASM_RUST_TOOLCHAIN}"
+                --profile minimal --target wasm32-unknown-emscripten
+        RESULT_VARIABLE ANOFOX_RUSTUP_RESULT
+        OUTPUT_VARIABLE ANOFOX_RUSTUP_OUTPUT
+        ERROR_VARIABLE ANOFOX_RUSTUP_OUTPUT)
+    if(NOT ANOFOX_RUSTUP_RESULT EQUAL 0)
+        message(FATAL_ERROR "Could not install Rust ${ANOFOX_WASM_RUST_TOOLCHAIN} for the WASM build:\n${ANOFOX_RUSTUP_OUTPUT}")
+    endif()
+    set(Rust_TOOLCHAIN "${ANOFOX_WASM_RUST_TOOLCHAIN}" CACHE STRING "Rust toolchain used by Corrosion" FORCE)
+    message(STATUS "WASM build: Rust ${ANOFOX_WASM_RUST_TOOLCHAIN}")
+endif()
+
 # Fetch Corrosion for Rust integration
 # Disable vcpkg for Corrosion's internal CMake to avoid toolchain conflicts
 include(FetchContent)

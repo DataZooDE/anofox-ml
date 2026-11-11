@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- README examples: `KernelDensity` had no `FROM`, the warm start continued a 3-feature model with 2 features, and the staged-prediction example used a table it never created (#87).
+
+### Added
+- CI runs every SQL example of the README and the Claude Code skills against the Linux build in a stock DuckDB CLI (#87).
+
 ## [0.2.0] - 2026-11-11
 
 Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/sipemu/anofox-ml) **0.5** from crates.io. This is the version submitted as a DuckDB community extension (#4). The release binaries are unsigned; see [Installation](https://github.com/DataZooDE/anofox-ml#installation).

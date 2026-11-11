@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Check the Claude Code skills in plugins/anofox-ml/skills against the built
-extension.
+"""Check the SQL in README.md and the Claude Code skills (plugins/anofox-ml/skills)
+against the built extension.
 
 - Every ```sql block runs in a fresh in-memory database after
   scripts/skill_snippets/fixtures.sql, with ./build/release/duckdb. A block
@@ -9,9 +9,13 @@ extension.
   function, and every kind named in a ml_*(...'Kind'...) call or in backticks
   must be a row of ml_estimators() (names in NOT_KINDS excepted).
 
-Usage: python3 scripts/check_skill_snippets.py [SKILL.md ...]
-Exit status: 0 clean, 1 on any failure, 2 without a built duckdb.
+Usage: python3 scripts/check_skill_snippets.py [--duckdb CLI --extension FILE] [FILE.md ...]
+Without --extension it uses build/release/duckdb, which has the extension
+built in; with it, a stock DuckDB CLI (CI: the release artifact) loads FILE.
+Exit status: 0 clean, 1 on any failure, 2 without a duckdb.
 """
+
+import argparse
 
 import pathlib
 import re
@@ -20,6 +24,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DUCKDB = ROOT / "build" / "release" / "duckdb"
+EXTENSION = None  # set by --extension
 FIXTURES = (ROOT / "scripts" / "skill_snippets" / "fixtures.sql").read_text()
 SKILLS = ROOT / "plugins" / "anofox-ml" / "skills"
 # CamelCase words in backticks that are not ml_estimators() rows: other
@@ -31,12 +36,22 @@ NOT_KINDS = {"GridSearchCV", "SelectFromModel", "RFE", "BLOB", "VARCHAR", "DOUBL
 
 
 def run(sql: str, *flags: str) -> tuple[bool, str]:
+    if EXTENSION:
+        flags = ("-unsigned", *flags)
+        sql = f"LOAD '{EXTENSION}';\n{sql}"
     p = subprocess.run([str(DUCKDB), "-bail", "-batch", *flags, ":memory:"], input=sql,
                        capture_output=True, text=True, timeout=600)
     return p.returncode == 0, (p.stdout if p.returncode == 0 else p.stderr or p.stdout).strip()
 
 
 def main() -> int:
+    global DUCKDB, EXTENSION
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--duckdb", type=pathlib.Path, default=DUCKDB)
+    ap.add_argument("--extension", type=pathlib.Path)
+    ap.add_argument("files", nargs="*", type=pathlib.Path)
+    args = ap.parse_args()
+    DUCKDB, EXTENSION = args.duckdb, args.extension and args.extension.resolve()
     if not DUCKDB.exists():
         print(f"{DUCKDB} is missing: build with `GEN=ninja make release` first")
         return 2
@@ -46,7 +61,7 @@ def main() -> int:
         print(out)
         return 2
     names = set(re.findall(r"\b\w+\b", out))
-    files = [pathlib.Path(a) for a in sys.argv[1:]] or sorted(SKILLS.glob("*/SKILL.md"))
+    files = args.files or [ROOT / "README.md", *sorted(SKILLS.glob("*/SKILL.md"))]
     failures = passed = 0
     for f in files:
         text = f.read_text()

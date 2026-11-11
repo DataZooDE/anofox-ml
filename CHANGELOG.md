@@ -6,6 +6,7 @@
 - README examples: `KernelDensity` had no `FROM`, the warm start continued a 3-feature model with 2 features, and the staged-prediction example used a table it never created (#87).
 
 ### Added
+- CI runs `test/sql` in a real browser (headless Chromium, `test/wasm/browser.mjs`) on DuckDB-Wasm 2.0 `wasm_eh`, through the playground page (#89).
 - Browser playground on GitHub Pages (https://datazoode.github.io/anofox-ml/): DuckDB-Wasm with anofox_ml and example queries; each release deploys it with its wasm builds (#88).
 - CI runs every SQL example of the README and the Claude Code skills against the Linux build in a stock DuckDB CLI (#87).
 

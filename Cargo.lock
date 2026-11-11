@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "anofox-ml-cluster"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49d7cb199c3c4409769075a4409df7f9115dad53a508b415007123ee10b20b17"
+checksum = "5137b307925537f5a5af46680e9504811469f647d992f4c14ec691fe2c234c38"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-manifold",
@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-conformal"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80b51fd0aae98f45115e99c021be14cfe99dc29013d4cb280d3a32d156be0048"
+checksum = "bc48003fd5156b261c849502c7d2ce393fb8412ea2cb22dc746a85ff172bf63c"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -33,9 +33,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-core"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "031542e60a18281d28954513ba0f0941d5c35a98206313cccc924a5ec7be7941"
+checksum = "675988ffd198858f4327344da8211eeaa8fdf6da961c808e98a0a3cc7620e186"
 dependencies = [
  "bincode",
  "ndarray",
@@ -51,9 +51,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-discriminant"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1754dff77743c11653d103ecbd9871624903568414b584a657ae71cef051e553"
+checksum = "1d3202b30db72beb27a072259dbcd1d74b7930cc3c1e935b8e070d839c9f2887"
 dependencies = [
  "anofox-ml-core",
  "faer",
@@ -64,9 +64,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-ensemble"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f4e63b68a3fc99816af3672fe6c023ad964be24c405cdbfc7bca5acc0c9c378"
+checksum = "abcd9f50939c1bbbacb5fbc5846a0b2220ca42d65c01b803d9197759289e5429"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-trees",
@@ -82,9 +82,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-gaussian-process"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "667b26216a9038c661fdbae09b1e42a39dc98db2d25e2d786ed60c221e67a16e"
+checksum = "0ba366a79f26cd7eb5c7faec4c4986ea02959609b5dfd989fb7b2a271658f439"
 dependencies = [
  "anofox-ml-core",
  "faer",
@@ -96,9 +96,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-linear"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4549d1892131387a61d814f1bbecc78845395d90f69e0078ea67fd08e031452"
+checksum = "2d6895e1789a34ca6d9acd94a0d42de41f9e6b66b2e2c24d80321453fbcf9115"
 dependencies = [
  "anofox-ml-core",
  "anofox-regression",
@@ -111,9 +111,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-manifold"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9812e88f34cce7dc88bbb28ca6f67813f302b92fc384ff8e4cad53ef9235d19d"
+checksum = "5822a830b30392e185e7d6620af21b77751fb2e44b2b9a9254ddabae8086caaf"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-neighbors",
@@ -126,9 +126,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-metrics"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e950daab9f2fc08868085f93ff2d8f48c9b8e6bc76d566968c18efa8bea319cc"
+checksum = "7701708736b6a5238f7de1dd2fbf21e7c1d98cc565abaed58d2392bbe9b75944"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -137,9 +137,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-naive-bayes"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ba08ad9af6d818489daa304717ccce168dde04be5505bbd22520672165a7df"
+checksum = "5fdecb2f79dfd02ba9b6b1f3695023fb2c1a6d68202fd054b6aa742ef798b547"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -149,9 +149,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-neighbors"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c0e8a758620e72cd4f12b8a39bf7d7360ef4e4d37406403ec7e53d1d3044672"
+checksum = "47ef6db65efe546a9b73d929b904e71ee7704b6da71b88df617bafa2a48827ad"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-discriminant",
@@ -165,9 +165,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-neural-networks"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8670f6654d059398233b04560c547589241527d1f91830e7456120fd9ed36882"
+checksum = "3f62efc9f396da639019ff9ec7d2a82e2eeb7ec38e726dccdbb3d6e65b27ee42"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -178,9 +178,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-preprocessing"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a3029c1422c36152e3d8b315f3076faa51fdae87dbe106b7db8969ae8adde94"
+checksum = "d3baab6f001c104ee59e90beb0ae908f52b409f5f41d860fe5d35c2e7dea7ed3"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-regression",
@@ -195,9 +195,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-registry"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "334a9bd576a4386e47caa403f0231f93fcf830d1a117aa35cf63a719ca14c94e"
+checksum = "b8bdb8aeca9152bac75a75aeb712e39bf3e06b938effe7eb1045aff98bb3d0c7"
 dependencies = [
  "anofox-ml-cluster",
  "anofox-ml-conformal",
@@ -222,9 +222,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-regression"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a163c6cffe676e41370091fe022c6107c8d15a5bff522d2dc5f87d2e5e0f0209"
+checksum = "64ce99a944140ebc98df49468ad893c3bbacc46567041d8ea2b943a798098f40"
 dependencies = [
  "anofox-ml-core",
  "anofox-ml-metrics",
@@ -238,9 +238,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-svm"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4e653af75ce424060b2034e6da16f0ce833b2fcd1c5cd8de0b99b3e8a7a30d8"
+checksum = "dbb3f0c1ffc8f0216eac99fb4db5da646736048cdb9333e4ac5b5ea65ef6db03"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -252,9 +252,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-text"
-version = "0.5.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3011f56e0d6ed7f48f4d01eb7ce421270c40b23629ca37fa1185d1d250b8fada"
+checksum = "ec0435721c5b67e78ee6a3116cfe82ac760d72c40f844b53d1a26eed1003c119"
 dependencies = [
  "anofox-ml-core",
  "ndarray",
@@ -263,9 +263,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-ml-trees"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa9ebb9bbb709fc18dda9566f711ed6f17a3db603e41db2a2c20ee5388522d51"
+checksum = "b3537782bd82d7e48d9990a44ea683e8539bf368b5b8b0e625ece75fb8c6c1c4"
 dependencies = [
  "anofox-ml-core",
  "ndarray",

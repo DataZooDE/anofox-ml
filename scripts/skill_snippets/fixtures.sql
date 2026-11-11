@@ -99,3 +99,8 @@ FROM range(600) t(i);
 -- a deployed model's labelled reference rows and unlabelled production rows
 CREATE TABLE reference AS SELECT *, units + (hash(id, 'e') % 100) / 50.0 - 1 AS forecast, 'w' || (day // 100) AS week FROM train;
 CREATE TABLE production AS SELECT *, units + (hash(id, 'e') % 100) / 50.0 - 1 AS forecast, 'w' || (day // 50) AS week FROM test;
+
+-- search results: relevance 0..3 per (query, document)
+CREATE TABLE search_log AS
+SELECT i // 10 AS query_id, x1, x2, least(3, greatest(0, floor(x1 * 4 - x2 * 2 + 1)))::DOUBLE AS relevance
+FROM (SELECT i, (hash(i, 'a') % 1000) / 1000.0 AS x1, (hash(i, 'b') % 1000) / 1000.0 AS x2 FROM range(1000) t(i));

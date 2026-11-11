@@ -92,7 +92,7 @@ The setting can only be given when the database is opened, e.g. `duckdb.connect(
 
 ### DuckDB-Wasm
 
-The extension runs in the browser too: **[try it in the playground](https://datazoode.github.io/anofox-ml/)**, DuckDB-Wasm with anofox_ml and example queries, nothing to install. CI loads the `wasm_eh` builds for DuckDB 1.5.6 and 2.0 in DuckDB-Wasm and runs the SQL test suite there (`test/wasm`); `wasm_mvp` and `wasm_threads` are built and checked statically. In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
+The extension runs in the browser too: **[try it in the playground](https://datazoode.github.io/anofox-ml/)**, DuckDB-Wasm with anofox_ml and example queries, nothing to install. CI runs the SQL test suite on the `wasm_eh` builds in DuckDB-Wasm, under Node for DuckDB 1.5.6 and 2.0 and in headless Chromium through the playground page for 2.0 (`test/wasm`). `wasm_mvp` and `wasm_threads` are built and checked statically: DuckDB-Wasm's threaded runtime cannot load any extension at the moment, DuckDB's own included ([extension-ci-tools#453](https://github.com/duckdb/extension-ci-tools/issues/453)). In the browser everything runs on one thread, so fits that use several threads natively (forests, boosting, tuning) are slower, and memory is limited to the browser tab's heap. `PerpetualRegressor` / `PerpetualClassifier` are not in the wasm builds, because their library always starts its own threads.
 
 ### From Source
 

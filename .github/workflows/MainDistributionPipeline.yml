@@ -152,6 +152,42 @@ jobs:
       - name: Run test/sql in DuckDB-Wasm
         run: node test/wasm/run.mjs --bundle ${{ matrix.bundle }} --ext wasm-artifact/anofox_ml.duckdb_extension.wasm
 
+  # test/sql in a real browser (headless Chromium) through the playground
+  # page, on DuckDB-Wasm 2.0 (#89). wasm_threads runs with --threads once
+  # threaded DuckDB-Wasm can load extensions at all: today no wasm_threads
+  # extension (DuckDB's own included) loads, since they import non-shared
+  # memory (duckdb/extension-ci-tools#453, duckdb/duckdb-wasm#2041).
+  wasm-browser:
+    name: DuckDB-Wasm in the browser (v2.0.0, wasm_eh)
+    needs: duckdb-2-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: anofox_ml-v2.0.0-extension-wasm_eh
+          path: wasm-artifact
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install the harness
+        run: |
+          npm --prefix test/wasm ci
+          npm --prefix test/wasm install --no-save @duckdb/duckdb-wasm@1.33.1-dev114.0
+
+      # The runner image's Google Chrome: `playwright install --with-deps`
+      # needs apt, whose mirrors fail to resolve on the runners now and then.
+      - name: Run test/sql in Chrome
+        env:
+          PLAYWRIGHT_CHANNEL: chrome
+        run: |
+          google-chrome --version
+          node test/wasm/browser.mjs --ext wasm-artifact/anofox_ml.duckdb_extension.wasm
+
   # Every SQL example in README.md and the Claude Code skills, on the Linux
   # build in a stock DuckDB CLI (#87).
   doc-snippets:
@@ -221,7 +257,7 @@ jobs:
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [duckdb-stable-build, duckdb-2-build, wasm, wasm-runtime, doc-snippets, build-and-test-rust]
+    needs: [duckdb-stable-build, duckdb-2-build, wasm, wasm-runtime, wasm-browser, doc-snippets, build-and-test-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: write

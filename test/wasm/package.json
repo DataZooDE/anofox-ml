@@ -11,5 +11,8 @@
   "dependencies": {
     "@duckdb/duckdb-wasm": "1.33.1-dev65.0",
     "web-worker": "1.2.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0"
   }
 }

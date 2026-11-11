@@ -185,8 +185,9 @@ endif()
 # the PLT. The first jump then goes through the dynamic loader's lazy-binding
 # resolver, which only preserves the SysV argument registers, and the kernels
 # continue with clobbered registers (LD_BIND_NOW=1 avoids the crash): wrong results or a segfault in
-# private_gemm_x86::pack_lhs. Executables and the loadable extension
-# (-Wl,--exclude-libs,ALL) bind the symbols locally and are not affected.
+# private_gemm_x86::pack_lhs (#68; upstream sarah-quinones/gemm-x64-v2#4).
+# Executables and the loadable extension (-Wl,--exclude-libs,ALL) bind the
+# symbols locally and are not affected.
 # Localizing the symbols in a copy of the archive makes the jumps direct
 # wherever the library ends up. pulp's libpulp_v* asm symbols get the same
 # treatment. All of these are defined and referenced in the single LTO object

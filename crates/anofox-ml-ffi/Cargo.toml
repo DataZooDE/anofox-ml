@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # PerpetualBooster only outside wasm: the perpetual crate builds its own
-# thread pool on every fit, which DuckDB-Wasm cannot start (#84).
+# thread pool on every fit, which DuckDB-Wasm cannot start (#84;
+# upstream perpetual-ml/perpetual#95).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 anofox-ml-registry = { version = "0.5", features = ["perpetual"] }

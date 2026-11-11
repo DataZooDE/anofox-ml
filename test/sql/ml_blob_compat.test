@@ -88,7 +88,9 @@ scaler	4	true
 split_conformal	4	true
 
 # anofox-ml 0.5 (written by scripts/blob_fixture.sql), with LightGBM,
-# CatBoost classification, the VARCHAR encoders and a text vectorizer
+# CatBoost classification, the VARCHAR encoders and a text vectorizer.
+# Relative tolerance 1e-9: the Gaussian process (exp, Cholesky) differs in
+# the last bits on MinGW's libm.
 statement ok
 CREATE TABLE fm5 AS SELECT "case" AS c, kind, method, unhex(blob_hex) AS model
 FROM read_csv('test/data/blobs/models_v0.5.csv', all_varchar = true);
@@ -98,7 +100,7 @@ CREATE TABLE fe5 AS SELECT "case" AS c, "row"::INT AS r, x, expected::DOUBLE[] A
 FROM read_csv('test/data/blobs/expected_v0.5.csv', all_varchar = true);
 
 query III
-SELECT c, count(*), max(list_max(list_transform(list_zip(got, e), lambda p: abs(p[1] - p[2])))) < 1e-12 FROM (
+SELECT c, count(*), max(list_max(list_transform(list_zip(got, e), lambda p: abs(p[1] - p[2]) / greatest(1, abs(p[2]))))) < 1e-9 FROM (
     SELECT c, e, CASE method
         WHEN 'predict' THEN [ml_predict(model, x::DOUBLE[])]
         WHEN 'predict_proba' THEN ml_predict_proba(model, x::DOUBLE[])

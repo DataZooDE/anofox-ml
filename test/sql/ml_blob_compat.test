@@ -86,3 +86,47 @@ perpetual	4	true
 rf	4	true
 scaler	4	true
 split_conformal	4	true
+
+# anofox-ml 0.5 (written by scripts/blob_fixture.sql), with LightGBM,
+# CatBoost classification, the VARCHAR encoders and a text vectorizer
+statement ok
+CREATE TABLE fm5 AS SELECT "case" AS c, kind, method, unhex(blob_hex) AS model
+FROM read_csv('test/data/blobs/models_v0.5.csv', all_varchar = true);
+
+statement ok
+CREATE TABLE fe5 AS SELECT "case" AS c, "row"::INT AS r, x, expected::DOUBLE[] AS e
+FROM read_csv('test/data/blobs/expected_v0.5.csv', all_varchar = true);
+
+query III
+SELECT c, count(*), max(list_max(list_transform(list_zip(got, e), lambda p: abs(p[1] - p[2])))) < 1e-12 FROM (
+    SELECT c, e, CASE method
+        WHEN 'predict' THEN [ml_predict(model, x::DOUBLE[])]
+        WHEN 'predict_proba' THEN ml_predict_proba(model, x::DOUBLE[])
+        WHEN 'transform' THEN ml_transform(model, x::DOUBLE[])
+        WHEN 'score_samples' THEN ml_score_samples(model, x::DOUBLE[])
+        WHEN 'transform_varchar' THEN ml_transform(model, x::VARCHAR[])
+        WHEN 'transform_text' THEN ml_transform(model, x) END AS got
+    FROM fm5 JOIN fe5 USING (c))
+GROUP BY c ORDER BY c;
+----
+catboost	4	true
+catboost_clf	4	true
+gnb	4	true
+gp	4	true
+hgb	4	true
+iforest	4	true
+kmeans	4	true
+ledoit_wolf	4	true
+lgbm	4	true
+lgbm_clf	4	true
+logistic_labels	4	true
+ols	4	true
+onehot	4	true
+ordinal	4	true
+pca	4	true
+perpetual	4	true
+rf	4	true
+scaler	4	true
+split_conformal	4	true
+tfidf	4	true
+voting	4	true

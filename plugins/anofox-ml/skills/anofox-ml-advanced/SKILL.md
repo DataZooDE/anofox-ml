@@ -14,13 +14,13 @@ description: >
   plain ml_fit_agg kind is not enough, for learning to rank
   (ml_fit_with_group_agg, LgbmRanker) or pipelines, or to monitor a
   deployed model in SQL.
-version: 0.2.0
+version: 0.3.0
 user-invocable: false
 ---
 
 # anofox_ml — composite estimators, special targets, monitoring
 
-**Extension:** `anofox_ml` v0.2.0 | Fitting and predicting basics are in the modeling skill.
+**Extension:** `anofox_ml` v0.3.0 | Fitting and predicting basics are in the modeling skill.
 
 Every kind here still fits with `ml_fit_agg` and predicts with the usual functions; the composition lives in the `params` JSON. A nested model is a spec `{"estimator": "<kind>", "estimator_params": {…}}`, and `SELECT default_params FROM ml_estimators() WHERE kind = '…'` shows every option of a wrapper.
 

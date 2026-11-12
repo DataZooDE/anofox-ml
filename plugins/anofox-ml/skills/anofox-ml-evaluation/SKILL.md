@@ -13,13 +13,13 @@ description: >
   checks. Use for "how good is this model", "cross-validate", "tune
   hyperparameters", "which features matter" or "prediction intervals" in
   SQL.
-version: 0.2.0
+version: 0.3.0
 user-invocable: false
 ---
 
 # anofox_ml — metrics, cross-validation, tuning, intervals
 
-**Extension:** `anofox_ml` v0.2.0 | Fitting and predicting basics are in the modeling skill.
+**Extension:** `anofox_ml` v0.3.0 | Fitting and predicting basics are in the modeling skill.
 
 Evaluate on rows the model did not train on: a hold-out table, CV folds, or `ml_cross_val_predict_by`. In-sample scores of flexible models (forests, boosting, kNN) are near perfect and say nothing.
 

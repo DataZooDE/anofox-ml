@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-11-12
+
+Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/sipemu/anofox-ml) **0.6** from crates.io. Install it with `INSTALL anofox_ml FROM community`, or from the zips below (unsigned; see [Installation](https://github.com/DataZooDE/anofox-ml#installation)). Try it in the browser: https://datazoode.github.io/anofox-ml/
 
 ### Changed
 - anofox-ml 0.6: 196 estimator kinds (from 188). New: `Pipeline`, `FeatureUnion`, `ColumnTransformer`, `SelectFromModel`, `LabelEncoder`, numeric `OrdinalEncoder`, `LgbmRanker` and `CatBoostMultiRegressor`. Models stored with 0.2, 0.4 and 0.5 load and predict identically (new 0.5 fixture, written by `scripts/blob_fixture.sql`). Refitting LightGBM or CatBoost can differ slightly: 0.6 fixed two LightGBM split-finding details and made some CatBoost defaults follow CatBoost's own (#93).

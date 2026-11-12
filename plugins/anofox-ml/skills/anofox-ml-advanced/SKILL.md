@@ -11,8 +11,9 @@ description: >
   process uncertainty (ml_predict_std), CatBoost categorical features, and
   production monitoring: multivariate drift (ml_domain_classifier_drift_by)
   and label-free performance estimation (ml_dle_estimate_by). Use when one
-  plain ml_fit_agg kind is not enough, or to monitor a deployed model in
-  SQL.
+  plain ml_fit_agg kind is not enough, for learning to rank
+  (ml_fit_with_group_agg, LgbmRanker) or pipelines, or to monitor a
+  deployed model in SQL.
 version: 0.2.0
 user-invocable: false
 ---
@@ -65,6 +66,8 @@ SELECT ml_predict(model, [1.0, 0.0, 3.0]) FROM (
 - **Several targets.** `MultiOutputRegressor` (nested `estimator` per target), `RegressorChain` (`order`), `MultiTaskLasso` / `MultiTaskElasticNet` (+ CV kinds) fit unsupervised on `list_concat(x, y)` with `y_columns` = number of targets; predict with X alone through `ml_predict_targets(model, x)` → `DOUBLE[]`.
 - **Two blocks.** `Cca`, `PlsCanonical`, `PlsSvd` fit on `[X | Y]` the same way; `ml_transform` scores X, `ml_transform_y(model, y)` scores Y. `PlsRegression` is an ordinary one-target regressor.
 - **Uncertainty.** `GaussianProcessRegressor` (default kernel `1.0 * RBF(1.0)`): `ml_predict_std(model, x)` next to `ml_predict`.
+- **Learning to rank.** `ml_fit_with_group_agg(kind, relevance, [x…], query_id [, params [, weight]])` for `LgbmRanker` (LambdaRank) or the ranking objectives of `LgbmRegressor` / `CatBoostRegressor`; `ml_predict` gives scores, rank within a query by `row_number() OVER (PARTITION BY query_id ORDER BY score DESC)`.
+- **Pipelines.** `Pipeline` (`steps`: specs, transformers then an estimator), `FeatureUnion` (`transformer_list`), `ColumnTransformer` (`transformers`, `remainder`) and `SelectFromModel` are kinds like any other: one BLOB, `ml_predict` / `ml_transform` on the raw features.
 - **CatBoost categories.** `CatBoostRegressor` / `CatBoostClassifier` take `cat_features` (0-based positions in the feature list) holding integer codes, e.g. `dense_rank() OVER (ORDER BY city) - 1`.
 
 ```sql

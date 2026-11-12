@@ -196,6 +196,11 @@ char *anofox_ml_fit_offset(const char *kind, const char *params, const double *x
                            const double *y, const double *w, const double *offset, size_t threads,
                            AnofoxMlBytes *out);
 
+// anofox_ml_fit with a query id per row (group: n_rows doubles) for the
+// ranking objectives (fit_with_group); y is required.
+char *anofox_ml_fit_group(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
+                          const double *y, const double *w, const double *group, size_t threads, AnofoxMlBytes *out);
+
 // Predict n_rows rows of x with an offset per row on the link scale (the
 // GLMs); `out` receives n_rows doubles.
 char *anofox_ml_predict_offset(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,

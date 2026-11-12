@@ -2,10 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- anofox-ml 0.6: 196 estimator kinds (from 188). New: `Pipeline`, `FeatureUnion`, `ColumnTransformer`, `SelectFromModel`, `LabelEncoder`, numeric `OrdinalEncoder`, `LgbmRanker` and `CatBoostMultiRegressor`. Models stored with 0.2, 0.4 and 0.5 load and predict identically (new 0.5 fixture, written by `scripts/blob_fixture.sql`). Refitting LightGBM or CatBoost can differ slightly: 0.6 fixed two LightGBM split-finding details and made some CatBoost defaults follow CatBoost's own (#93).
+
 ### Fixed
 - README examples: `KernelDensity` had no `FROM`, the warm start continued a 3-feature model with 2 features, and the staged-prediction example used a table it never created (#87).
 
 ### Added
+- `ml_fit_with_group_agg(kind, y, x, query [, params [, weight]])`: learning to rank (`LgbmRanker`, and the ranking objectives of `LgbmRegressor` / `CatBoostRegressor`) (#93).
 - 0.2.0 is published as a DuckDB community extension: `INSTALL anofox_ml FROM community` (#4).
 - CI runs `test/sql` in a real browser (headless Chromium, `test/wasm/browser.mjs`) on DuckDB-Wasm 2.0 `wasm_eh`, through the playground page (#89).
 - Browser playground on GitHub Pages (https://datazoode.github.io/anofox-ml/): DuckDB-Wasm with anofox_ml and example queries; each release deploys it with its wasm builds (#88).

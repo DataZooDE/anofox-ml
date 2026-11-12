@@ -29,10 +29,9 @@ EXTENSION = None  # set by --extension
 FIXTURES = (ROOT / "scripts" / "skill_snippets" / "fixtures.sql").read_text()
 SKILLS = ROOT / "plugins" / "anofox-ml" / "skills"
 # CamelCase words in backticks that are not ml_estimators() rows: other
-# libraries' names, and OrdinalEncoder (VARCHAR input, handled by the
-# extension itself).
+# libraries' names and option values.
 NOT_KINDS = {"GridSearchCV", "SelectFromModel", "RFE", "BLOB", "VARCHAR", "DOUBLE",
-             "BIGINT", "INTEGER", "BOOLEAN", "STRUCT", "NULL", "NaN", "OrdinalEncoder",
+             "BIGINT", "INTEGER", "BOOLEAN", "STRUCT", "NULL", "NaN",
              "BalancedAccuracy"}
 
 

@@ -1,0 +1,41 @@
+# name: test/sql/ml_rank.test
+# description: learning to rank with ml_fit_with_group_agg (anofox-ml 0.6)
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# 200 queries x 10 documents; relevance 0..3 grows with f1 and falls with f2
+statement ok
+CREATE TABLE docs AS
+SELECT q, d, f1, f2, least(3, greatest(0, floor(f1 * 4 - f2 * 2 + 1)))::DOUBLE AS rel
+FROM (SELECT i // 10 AS q, i % 10 AS d, (hash(i, 'a') % 1000) / 1000.0 AS f1, (hash(i, 'b') % 1000) / 1000.0 AS f2
+      FROM range(2000) t(i));
+
+# rows of a query need not be consecutive: shuffle them
+statement ok
+CREATE TABLE ranker AS
+SELECT ml_fit_with_group_agg('LgbmRanker', rel, [f1, f2], q, '{"n_estimators": 50}' ORDER BY hash(q, d)) AS m
+FROM docs WHERE q < 150;
+
+# on held-out queries, the top-scored document is (one of) the most relevant in most queries
+query I
+SELECT avg((rel = max_rel)::INT) > 0.8 FROM (
+    SELECT q, rel, max(rel) OVER (PARTITION BY q) AS max_rel,
+           row_number() OVER (PARTITION BY q ORDER BY ml_predict(m, [f1, f2]) DESC) AS pos
+    FROM docs, ranker WHERE q >= 150)
+WHERE pos = 1;
+----
+true
+
+query I
+SELECT ml_model_info(m).kind FROM ranker;
+----
+LgbmRanker
+
+statement error
+SELECT ml_fit_with_group_agg('OlsRegressor', rel, [f1, f2], q) FROM docs;
+----
+fit_with_group

@@ -596,6 +596,33 @@ void FitOffsetFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector
 }
 
 //===--------------------------------------------------------------------===//
+// ml_fit_with_group_agg(kind VARCHAR, y DOUBLE, x DOUBLE[], query DOUBLE [, params VARCHAR [, weight DOUBLE]])
+//   -> BLOB
+// Learning to rank (fit_with_group): one query id per row, collected like an
+// offset; the Rust side orders the rows by query.
+//===--------------------------------------------------------------------===//
+void FitGroupFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count,
+                      idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_fit_with_group_agg");
+        AnofoxMlBytes blob {nullptr, 0};
+        Check(anofox_ml_fit_group(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols, s.y->data(),
+                                  s.has_w ? s.w->data() : nullptr, s.off->data(), FitThreads(aggr), &blob),
+              "ml_fit_with_group_agg");
+        compat::FlatData<string_t>(result)[row] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
+        anofox_ml_free_bytes(blob);
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_tune_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[], search_space VARCHAR [, options VARCHAR])
 //   -> STRUCT(best_params VARCHAR, best_score DOUBLE, model BLOB, trials VARCHAR)
 // Grid / random search with k-fold CV; the search space rides in `params`.
@@ -2005,6 +2032,19 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     offset_set.AddFunction(make_offset({V, D, features, D, V}, FitUpdate<true, false, false, false, false, true>));
     offset_set.AddFunction(make_offset({V, D, features, D, V, D}, FitUpdate<true, true, false, false, false, true>));
     loader.RegisterFunction(offset_set);
+
+    AggregateFunctionSet group_set("ml_fit_with_group_agg");
+    auto make_group = [](vector<LogicalType> args, aggregate_update_t update) {
+        AggregateFunction f("ml_fit_with_group_agg", std::move(args), LogicalType(LogicalTypeId::BLOB),
+                            AggregateFunction::StateSize<FitState>, compat::StateInit<FitInitialize>, update,
+                            FitCombine, FitGroupFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+        f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+        return f;
+    };
+    group_set.AddFunction(make_group({V, D, features, D}, FitUpdate<true, false, false, false, false, true>));
+    group_set.AddFunction(make_group({V, D, features, D, V}, FitUpdate<true, false, false, false, false, true>));
+    group_set.AddFunction(make_group({V, D, features, D, V, D}, FitUpdate<true, true, false, false, false, true>));
+    loader.RegisterFunction(group_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;
     auto make_rows = [&](const char *name, LogicalType result, aggregate_finalize_t finalize,

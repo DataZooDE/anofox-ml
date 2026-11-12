@@ -11,14 +11,14 @@ description = "C ABI over anofox-ml-registry for the anofox_ml DuckDB extension"
 crate-type = ["staticlib"]
 
 [dependencies]
-anofox-ml-core = "0.5"
-anofox-ml-registry = "0.5"
-anofox-ml-metrics = "0.5"
-anofox-ml-conformal = "0.5"
-anofox-ml-text = "0.5"
-anofox-ml-preprocessing = "0.5"
-anofox-ml-cluster = "0.5"
-anofox-ml-manifold = "0.5"
+anofox-ml-core = "0.6"
+anofox-ml-registry = "0.6"
+anofox-ml-metrics = "0.6"
+anofox-ml-conformal = "0.6"
+anofox-ml-text = "0.6"
+anofox-ml-preprocessing = "0.6"
+anofox-ml-cluster = "0.6"
+anofox-ml-manifold = "0.6"
 ndarray = "0.16"
 rand = "0.8"
 rayon = "1.10"
@@ -29,4 +29,4 @@ serde_json = "1"
 # thread pool on every fit, which DuckDB-Wasm cannot start (#84;
 # upstream perpetual-ml/perpetual#95).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-anofox-ml-registry = { version = "0.5", features = ["perpetual"] }
+anofox-ml-registry = { version = "0.6", features = ["perpetual"] }

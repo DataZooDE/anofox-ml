@@ -9,13 +9,13 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSL%201.1-blue.svg" alt="License: BSL 1.1"></a>
   <a href="https://duckdb.org"><img src="https://img.shields.io/badge/DuckDB-1.5.6-green.svg" alt="DuckDB"></a>
   <a href="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/DataZooDE/anofox-ml/actions/workflows/MainDistributionPipeline.yml/badge.svg?branch=main" alt="Build"></a>
-  <img src="https://img.shields.io/badge/estimators-188-brightgreen.svg" alt="188 estimators">
+  <img src="https://img.shields.io/badge/estimators-196-brightgreen.svg" alt="196 estimators">
   <a href="#-claude-code-skills"><img src="https://img.shields.io/badge/Claude_Code-AI_skills_plugin-8A2BE2" alt="Claude Code plugin"></a>
   <a href="https://datazoode.github.io/anofox-ml/"><img src="https://img.shields.io/badge/try_it-in_your_browser-2f6f5e" alt="Try it in your browser"></a>
   <img src="https://img.shields.io/badge/status-early%20development-orange.svg" alt="Status: early development">
 </p>
 
-A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 188 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
+A DuckDB extension that brings the [anofox-ml](https://github.com/sipemu/anofox-ml) Rust library into SQL: 196 scikit-learn-compatible estimators, checked against scikit-learn. You fit a model per group with an aggregate, store it as a `BLOB` and predict with it in any later query.
 
 > **Status: early development.** The functions below work and are tested; the API may still change.
 
@@ -241,6 +241,7 @@ The skills live in [`plugins/anofox-ml/`](plugins/anofox-ml/). For development, 
 | `ml_partial_fit_agg(model, [y,] [x1, x2, …] [, params])` | Aggregate: fold the group's rows into a stored model as one more batch (`partial_fit`). Works for the naive Bayes kinds, SGD, PassiveAggressive and MLP models, and without `y` for StandardScaler, MinMaxScaler, MaxAbsScaler and IncrementalPca. For naive Bayes and the scalers, batches give the same model as one fit. Classes are fixed by the first fit |
 | `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |
 | `ml_fit_with_offset_agg(kind, y, [x1, x2, …], offset [, params [, weight]])` | `ml_fit_agg` for the GLMs with an offset per row on the link scale, e.g. `ln(exposure)` for counts: `PoissonRegressor`, `GammaRegressor`, `TweedieRegressor` and `BinomialRegressor` (proportions `y`, trial counts as `weight`). Rows with a NULL offset are skipped |
+| `ml_fit_with_group_agg(kind, y, [x1, x2, …], query [, params [, weight]])` | Learning to rank: `query` is a numeric query id per row (`dense_rank()` for strings), and `y` the relevance. For `LgbmRanker` (LambdaRank), and the ranking objectives of `LgbmRegressor` / `CatBoostRegressor`. A query's rows need not be consecutive; `ml_predict` gives the ranking scores |
 | `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …), and for the kinds fitted on `[X \| Y]` with `y_columns` (`MultiOutputRegressor`, `RegressorChain`, `MultiTask*`, `Cca`, `PlsCanonical`, `PlsSvd`): pass `list_concat(x, y)`; the model then takes `X` alone |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
 | `ml_predict(model, [x1, x2, …], offset)` | GLM prediction with an offset on the link scale (a model from `ml_fit_with_offset_agg`); `ml_predict(model, x)` predicts at offset 0 |
@@ -639,6 +640,25 @@ CREATE TABLE dle AS SELECT ml_fit_agg('LgbmRegressor', abs(y - forecast), [price
 SELECT week, avg(greatest(ml_predict(mae_model, [price, promo, dow, forecast]), 0)) AS estimated_mae FROM production, dle GROUP BY week;
 ```
 
+**Learning to rank.** `ml_fit_with_group_agg` fits a ranker on relevance labels per query (search results, recommendations); `ml_predict` scores each row, and ordering by the score within a query is the ranking:
+
+```sql
+CREATE TABLE ranker AS
+SELECT ml_fit_with_group_agg('LgbmRanker', relevance, [x1, x2], query_id, '{"n_estimators": 50}') AS m FROM search_log;
+SELECT query_id, row_number() OVER (PARTITION BY query_id ORDER BY ml_predict(m, [x1, x2]) DESC) AS position, x1, x2
+FROM search_log, ranker ORDER BY query_id, position LIMIT 10;
+```
+
+**Pipelines.** `Pipeline` chains transformers and a final estimator into one model (`steps`, as `{estimator, estimator_params}` specs); `FeatureUnion` concatenates transformers' outputs and `ColumnTransformer` applies them to column subsets:
+
+```sql
+WITH m AS (SELECT ml_fit_agg('Pipeline', y, [x1, x2, x3], '{"steps": [
+         {"estimator": "StandardScaler", "estimator_params": {}},
+         {"estimator": "Pca", "estimator_params": {"n_components": 2}},
+         {"estimator": "RidgeRegressor", "estimator_params": {}}]}') AS model FROM train)
+SELECT ml_r2(y, ml_predict(model, [x1, x2, x3])) FROM test, m;
+```
+
 **Kernel approximation.** `Nystroem`, `RbfSampler` and the random projections map features into a space where a linear model can fit non-linear structure. Stack them with `ml_transform`:
 
 ```sql
@@ -651,7 +671,7 @@ SELECT ml_predict_proba(model, ml_transform(fm, [a, b])) FROM test, m;
 
 | Topic | Issue |
 |---|---|
-| Everything else in anofox-ml 0.5 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
+| Everything else in anofox-ml 0.6 (tracker) | [#8](https://github.com/DataZooDE/anofox-ml/issues/8) |
 
 ## 🧮 Estimators
 
@@ -659,7 +679,7 @@ Pass the `kind` exactly as listed. `SELECT * FROM ml_estimators()` shows the def
 
 | Category | Kinds |
 |---|---|
-| **Trees & Ensembles** | `DecisionTreeClassifier`, `DecisionTreeRegressor`, `RandomForestClassifier`, `RandomForestRegressor`, `ExtraTreesClassifier`, `ExtraTreesRegressor`, `GradientBoostingClassifier`, `GradientBoostingRegressor`, `HistGradientBoostingClassifier`, `HistGradientBoostingRegressor`, `LgbmClassifier`, `LgbmRegressor`, `AdaBoostClassifier`, `AdaBoostRegressor`, `BaggingClassifier`, `BaggingRegressor`, `CatBoostClassifier`, `CatBoostRegressor`, `PerpetualRegressor`, `PerpetualClassifier`, `ExtraTreeClassifier`, `ExtraTreeRegressor`, `BaggingEstimatorClassifier`, `BaggingEstimatorRegressor` (bagging over any kind) |
+| **Trees & Ensembles** | `DecisionTreeClassifier`, `DecisionTreeRegressor`, `RandomForestClassifier`, `RandomForestRegressor`, `ExtraTreesClassifier`, `ExtraTreesRegressor`, `GradientBoostingClassifier`, `GradientBoostingRegressor`, `HistGradientBoostingClassifier`, `HistGradientBoostingRegressor`, `LgbmClassifier`, `LgbmRegressor`, `LgbmRanker`, `AdaBoostClassifier`, `AdaBoostRegressor`, `BaggingClassifier`, `BaggingRegressor`, `CatBoostClassifier`, `CatBoostRegressor`, `CatBoostMultiRegressor`, `PerpetualRegressor`, `PerpetualClassifier`, `ExtraTreeClassifier`, `ExtraTreeRegressor`, `BaggingEstimatorClassifier`, `BaggingEstimatorRegressor` (bagging over any kind) |
 | **SVM** | `Svc`, `Svr`, `NuSvc`, `NuSvr`, `LinearSvc`, `LinearSvr` |
 | **Neighbours** | `KnnClassifier`, `KnnRegressor`, `RadiusNeighborsClassifier`, `RadiusNeighborsRegressor`, `NearestCentroid`, `KNeighborsTransformer`, `NeighborhoodComponentsAnalysis` |
 | **Naive Bayes** | `GaussianNB`, `BernoulliNB`, `MultinomialNB`, `ComplementNB`, `CategoricalNB` |
@@ -670,8 +690,8 @@ Pass the `kind` exactly as listed. `SELECT * FROM ml_estimators()` shows the def
 | **Outlier Detection** | `IsolationForest`, `LocalOutlierFactor`, `OneClassSvm`, `EllipticEnvelope` |
 | **Covariance & Density** | `EmpiricalCovariance`, `ShrunkCovariance`, `LedoitWolf`, `Oas`, `MinCovDet`, `KernelDensity` |
 | **Decomposition & Manifold** | `Pca`, `IncrementalPca`, `KernelPca`, `TruncatedSvd`, `FastIca`, `Nmf`, `ClassicalMds`, `Isomap`, `LocallyLinearEmbedding`, `TSne`, `FactorAnalysis`, `FeatureAgglomeration`, `Nystroem`, `RbfSampler`, `GaussianRandomProjection`, `SparseRandomProjection`, `SparsePca`, `MiniBatchNmf`, `LatentDirichletAllocation`, `SpectralEmbedding`, `RandomTreesEmbedding`, `PlsRegression`, `PlsCanonical`, `PlsSvd`, `Cca` |
-| **Preprocessing** | `StandardScaler`, `MinMaxScaler`, `MaxAbsScaler`, `RobustScaler`, `Normalizer`, `Binarizer`, `PowerTransformer`, `QuantileTransformer`, `KBinsDiscretizer`, `PolynomialFeatures`, `SplineTransformer`, `RcsTransformer`, `TargetEncoder`, `SimpleImputer`, `KnnImputer`, `IterativeImputer`, `MissingIndicator`, `VarianceThreshold`, `SelectKBest`, `GenericUnivariateSelect`, `MutualInformationSelector`, `KernelCenterer`, `TfidfTransformer`, `CountVectorizer`, `TfidfVectorizer` (VARCHAR input) |
-| **Meta-estimators** | `OneVsRestClassifier`, `OneVsOneClassifier`, `FixedThresholdClassifier`, `TunedThresholdClassifierCV`, `SelfTrainingClassifier`; they take a base `estimator` kind and `estimator_params`, `VotingClassifier`, `VotingRegressor`, `StackingClassifier`, `StackingRegressor`, `CalibratedClassifierCV`, `TransformedTargetRegressor`, `MultiOutputRegressor`, `RegressorChain`, `Rfe`, `Rfecv`, `SequentialFeatureSelector` |
+| **Preprocessing** | `StandardScaler`, `MinMaxScaler`, `MaxAbsScaler`, `RobustScaler`, `Normalizer`, `Binarizer`, `PowerTransformer`, `QuantileTransformer`, `KBinsDiscretizer`, `PolynomialFeatures`, `SplineTransformer`, `RcsTransformer`, `TargetEncoder`, `SimpleImputer`, `KnnImputer`, `IterativeImputer`, `MissingIndicator`, `VarianceThreshold`, `SelectKBest`, `GenericUnivariateSelect`, `MutualInformationSelector`, `KernelCenterer`, `TfidfTransformer`, `CountVectorizer`, `TfidfVectorizer` (VARCHAR input), `LabelEncoder`, `OrdinalEncoder` (numeric categories; `VARCHAR` columns see [Categorical Features](#categorical-features)) |
+| **Meta-estimators** | `OneVsRestClassifier`, `OneVsOneClassifier`, `FixedThresholdClassifier`, `TunedThresholdClassifierCV`, `SelfTrainingClassifier`; they take a base `estimator` kind and `estimator_params`, `VotingClassifier`, `VotingRegressor`, `StackingClassifier`, `StackingRegressor`, `CalibratedClassifierCV`, `TransformedTargetRegressor`, `MultiOutputRegressor`, `RegressorChain`, `Rfe`, `Rfecv`, `SequentialFeatureSelector`, `SelectFromModel`, and the compositions `Pipeline`, `FeatureUnion`, `ColumnTransformer` |
 | **Conformal** | `SplitConformalRegressor`, `CrossConformalRegressor`, `NormalizedConformalRegressor`, `ConformalizedQuantileRegressor`, `MondrianConformalRegressor`, `SplitConformalClassifier`, `MondrianConformalClassifier`; intervals and sets through `ml_predict_interval` / `ml_predict_set`, see [Conformal Prediction](#conformal-prediction) |
 | **Baselines & Semi-supervised** | `DummyClassifier`, `DummyRegressor`, `LabelPropagation`, `LabelSpreading` (a NULL target marks an unlabelled row, see Behaviour Notes) |
 | **Gaussian Processes** | `GaussianProcessRegressor`, `GaussianProcessClassifier` |
@@ -686,7 +706,7 @@ Linear models and GLMs **with statistical inference** (standard errors, tests, d
 - **Row order:** `ml_cluster_agg`, `ml_outlier_score_agg` and `ml_fit_transform_agg` return one entry per input row in input order. That order is only well defined with `ORDER BY` inside the aggregate.
 - **Classes:** for models with `predict_proba`, the sorted distinct training targets are stored as `classes`. With `VARCHAR` targets, the sorted distinct labels are stored as `labels`, the model learns their index, and `classes` / `ml_predict_proba` columns follow the label order.
 - **Feature count:** predicting with a feature list of the wrong length is an error.
-- **Stored models across versions:** a model BLOB keeps predicting the same after an upgrade of the extension. BLOBs written with anofox-ml 0.2 and 0.4 are tested against the outputs they gave then (`test/data/blobs`). Refitting after an upgrade can give different numbers when a kind's training changed: anofox-ml 0.4 changed LGBM, HGB early stopping, SGD and SelectKBest ties; 0.5 changed LightGBM's bagging (`subsample` needs `subsample_freq > 0`) and some CatBoost defaults.
+- **Stored models across versions:** a model BLOB keeps predicting the same after an upgrade of the extension. BLOBs written with anofox-ml 0.2, 0.4 and 0.5 are tested against the outputs they gave then (`test/data/blobs`). Refitting after an upgrade can give different numbers when a kind's training changed: anofox-ml 0.4 changed LGBM, HGB early stopping, SGD and SelectKBest ties; 0.5 changed LightGBM's bagging (`subsample` needs `subsample_freq > 0`) and some CatBoost defaults.
 - **Memory:** a fitting aggregate holds its group's training set in memory. `SET anofox_ml_max_fit_values = n` caps it per group (rows × features, default 100 million ≈ 800 MB; `0` = unlimited). Past the cap the query fails with a hint; sample large groups with `USING SAMPLE` before fitting.
 - **Parallelism:** fits run in one shared thread pool sized to DuckDB's `threads`. DuckDB spreads groups over its workers, and estimators with internal parallelism (forests, bagging, isolation forests, …) use the pool too, so a single big model uses every core while many groups still share the same threads. `SET anofox_ml_threads = n` caps the threads of the fits (`0` = DuckDB's `threads`, `1` = sequential). Predictions run single-threaded per chunk, with DuckDB parallelising across chunks. Seeded models are identical whatever the thread count.
 - **Determinism:** estimators with randomness take a `seed` parameter with a fixed default, so the same query gives the same model.
@@ -738,7 +758,7 @@ make check_skills                 # run the SQL examples of this README and the 
 | `test/sql/` | sqllogictests |
 | `plugins/anofox-ml/` | Claude Code plugin (skills); `scripts/check_skill_snippets.py` runs their SQL |
 
-The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml) 0.5 on crates.io (`anofox-ml-registry`, `-core`, `-metrics`, `-conformal`, `-text`).
+The estimators come from [anofox-ml](https://github.com/sipemu/anofox-ml) 0.6 on crates.io (`anofox-ml-registry`, `-core`, `-metrics`, `-conformal`, `-text`).
 
 ### Verify Installation
 

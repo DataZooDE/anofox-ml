@@ -28,7 +28,7 @@ mod tpe;
 mod tune;
 
 use anofox_ml_registry::{DynModel, Out};
-use ndarray::{ArrayView1, ArrayView2};
+use ndarray::{ArrayView1, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 4] = b"AMLX";
@@ -715,6 +715,95 @@ pub unsafe extern "C" fn anofox_ml_fit_offset(
         let offset = ArrayView1::from(std::slice::from_raw_parts(offset, n_rows));
         let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
         fit_offset_impl(kind, params, x, y, w, offset, threads)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(bytes)) => {
+            let mut b = bytes.into_boxed_slice();
+            *out = AnofoxMlBytes {
+                data: b.as_mut_ptr(),
+                len: b.len(),
+            };
+            std::mem::forget(b);
+            std::ptr::null_mut()
+        }
+        Ok(Err(e)) => err(e),
+        Err(p) => err(crate::panic_message("while fitting", p)),
+    }
+}
+
+/// Fit with query groups (`fit_with_group`: the ranking objectives of
+/// `LgbmRanker`, `LgbmRegressor`, `CatBoostRegressor`). `group` holds a query
+/// id per row; the rows are stably ordered by query, so a query's rows need
+/// not be consecutive in the input.
+fn fit_group_impl(
+    kind: &str,
+    params: &str,
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    w: Option<ArrayView1<f64>>,
+    group: &[f64],
+    threads: usize,
+) -> Result<Vec<u8>, String> {
+    let mut model = make_model(kind, params)?;
+    require_method(kind, model.as_ref(), "fit_with_group")?;
+    let mut order: Vec<usize> = (0..group.len()).collect();
+    order.sort_by(|&a, &b| group[a].total_cmp(&group[b]));
+    let (xs, ys) = (x.select(Axis(0), &order), y.select(Axis(0), &order));
+    let ws = w.map(|w| w.select(Axis(0), &order));
+    let mut sizes: Vec<usize> = Vec::new();
+    for (i, &r) in order.iter().enumerate() {
+        if i > 0 && group[r] == group[order[i - 1]] {
+            *sizes.last_mut().expect("a previous query") += 1;
+        } else {
+            sizes.push(1);
+        }
+    }
+    run_fit(threads, || {
+        model.fit_with_group(
+            xs.view(),
+            Some(ys.view()),
+            ws.as_ref().map(|w| w.view()),
+            &sizes,
+        )
+    })?
+    .map_err(|e| e.to_string())?;
+    encode_fitted(kind, model.as_ref(), x.ncols(), Some(y), None)
+}
+
+/// [`anofox_ml_fit`] with a query id per row (`fit_with_group`, learning to
+/// rank); `y` is required.
+///
+/// # Safety
+/// As [`anofox_ml_fit`]; `group` holds `n_rows` doubles.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn anofox_ml_fit_group(
+    kind: *const c_char,
+    params: *const c_char,
+    x: *const f64,
+    n_rows: usize,
+    n_cols: usize,
+    y: *const f64,
+    w: *const f64,
+    group: *const f64,
+    threads: usize,
+    out: *mut AnofoxMlBytes,
+) -> *mut c_char {
+    let run = || -> Result<Vec<u8>, String> {
+        let kind = str_arg(kind, "kind")?;
+        let params = if params.is_null() {
+            ""
+        } else {
+            str_arg(params, "params")?
+        };
+        let x = matrix(x, n_rows, n_cols)?;
+        if y.is_null() || group.is_null() {
+            return Err("targets and query ids are required".into());
+        }
+        let y = ArrayView1::from(std::slice::from_raw_parts(y, n_rows));
+        let group = std::slice::from_raw_parts(group, n_rows);
+        let w = (!w.is_null()).then(|| ArrayView1::from(std::slice::from_raw_parts(w, n_rows)));
+        fit_group_impl(kind, params, x, y, w, group, threads)
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(Ok(bytes)) => {

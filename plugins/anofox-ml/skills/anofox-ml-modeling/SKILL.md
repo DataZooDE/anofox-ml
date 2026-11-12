@@ -2,7 +2,7 @@
 name: anofox-ml-modeling
 description: >
   Fitting and predicting with the anofox_ml DuckDB extension: ml_fit_agg over
-  any of its 188 estimator kinds (trees, boosting, linear / GLM, SVM, kNN,
+  any of its 196 estimator kinds (trees, boosting, linear / GLM, SVM, kNN,
   naive Bayes, MLP, Gaussian processes), per GROUP BY group, models stored as
   BLOBs, ml_predict / ml_predict_proba / ml_predict_label and the other model
   functions, JSON params, string labels, sample weights, ml_estimators,
@@ -18,7 +18,7 @@ user-invocable: false
 
 # anofox_ml — fitting, predicting, models as data
 
-**Extension:** `anofox_ml` v0.2.0 (anofox-ml 0.5) | **DuckDB:** v1.5.6 / v2.0.0 | `INSTALL anofox_ml FROM community; LOAD anofox_ml;`
+**Extension:** `anofox_ml` v0.2.0 (anofox-ml 0.6) | **DuckDB:** v1.5.6 / v2.0.0 | `INSTALL anofox_ml FROM community; LOAD anofox_ml;`
 
 The model is a value. `ml_fit_agg` is an aggregate that fits one model per group and returns a `BLOB`; every later query predicts by passing that BLOB and a feature list to a scalar function. Features are always one `DOUBLE[]` list, `[x1, x2, …]`, in the same order at fit and predict time.
 

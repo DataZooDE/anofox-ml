@@ -12,13 +12,13 @@ description: >
   covariance / Mahalanobis, mutual information and feature selection
   kinds. Use for "prepare features", "cluster / segment rows", "find
   anomalies", "reduce dimensions" or "encode strings / text" in SQL.
-version: 0.2.0
+version: 0.3.0
 user-invocable: false
 ---
 
 # anofox_ml — features, clustering, outliers, embeddings
 
-**Extension:** `anofox_ml` v0.2.0 | Fitting and predicting basics are in the modeling skill.
+**Extension:** `anofox_ml` v0.3.0 | Fitting and predicting basics are in the modeling skill.
 
 A transformer is a model like any other: fit it with the unsupervised `ml_fit_agg(kind, [x…] [, params])`, keep the BLOB, and apply it with `ml_transform(model, [x…])`, which returns a `DOUBLE[]`. Chain steps by feeding one `ml_transform` into the next fit, and concatenate blocks with `list_concat`.
 

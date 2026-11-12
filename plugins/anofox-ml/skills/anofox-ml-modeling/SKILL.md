@@ -12,13 +12,13 @@ description: >
   ml_fit_with_validation_agg) and the ml_fit_predict_by table macros. Use
   for "train / score a model in SQL", "one model per store / segment", or
   any question about these functions.
-version: 0.2.0
+version: 0.3.0
 user-invocable: false
 ---
 
 # anofox_ml — fitting, predicting, models as data
 
-**Extension:** `anofox_ml` v0.2.0 (anofox-ml 0.6) | **DuckDB:** v1.5.6 / v2.0.0 | `INSTALL anofox_ml FROM community; LOAD anofox_ml;`
+**Extension:** `anofox_ml` v0.3.0 (anofox-ml 0.6) | **DuckDB:** v1.5.6 / v2.0.0 | `INSTALL anofox_ml FROM community; LOAD anofox_ml;`
 
 The model is a value. `ml_fit_agg` is an aggregate that fits one model per group and returns a `BLOB`; every later query predicts by passing that BLOB and a feature list to a scalar function. Features are always one `DOUBLE[]` list, `[x1, x2, …]`, in the same order at fit and predict time.
 

@@ -170,6 +170,14 @@ FROM train GROUP BY store;
 SELECT unnest(list(id ORDER BY id)) AS id,
        unnest(ml_outlier_score_agg('IsolationForest', [price, units] ORDER BY id)) AS score
 FROM train ORDER BY score LIMIT 3;
+
+-- clustering on your own distance (here |Δprice|, any pairwise measure works): one row of
+-- distances to every point per point, in the same order; Dbscan with "metric": "Precomputed"
+WITH p AS (SELECT id, price FROM train WHERE store = 'store_0' AND id < 120),
+     d AS (SELECT a.id, list(abs(a.price - b.price) ORDER BY b.id) AS dist FROM p a, p b GROUP BY a.id)
+SELECT unnest(list(id ORDER BY id)) AS id,
+       unnest(ml_cluster_agg('Dbscan', dist, '{"eps": 0.05, "min_samples": 3, "metric": "Precomputed"}' ORDER BY id)) AS cluster
+FROM d;
 ```
 
 More patterns:

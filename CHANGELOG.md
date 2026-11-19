@@ -7,6 +7,7 @@
 - `ml_confusion_matrix`, `ml_classification_report`, `ml_roc_curve` and `ml_precision_recall_curve`: table-valued metric aggregates, matching scikit-learn (#98).
 - `ml_model_export(model)` and `ml_model_import(kind, bytes, n_features [, classes | labels])`: move models to and from anofox-ml in Rust as plain registry bytes (#100).
 - Model selection aggregates: `ml_learning_curve_agg`, `ml_validation_curve_agg`, `ml_permutation_test_agg`, `ml_nested_cv_agg` and `ml_bootstrap_validate_agg` (.632, .632+ and optimism-corrected estimates); `bootstrap` and `bootstrap_stratified` methods for `ml_cv_splits_agg` (#99).
+- Clustering on a precomputed distance matrix: `Dbscan` with `"metric": "Precomputed"` and one row of distances per point, now tested and documented. `Hdbscan`, `Optics` and the others wait on sipemu/anofox-ml#276 (#97).
 
 ## [0.3.0] - 2026-11-12
 

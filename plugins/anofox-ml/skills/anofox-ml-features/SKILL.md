@@ -80,7 +80,7 @@ These aggregates return one entry per input row, **in input order**: put the sam
 | `ml_outlier_score_agg(kind, [x…] [, params [, weight]])` | `DOUBLE`, **lower = more anomalous** (`IsolationForest`, `LocalOutlierFactor`, `OneClassSvm`, `EllipticEnvelope`) |
 | `ml_fit_transform_agg(kind, [y,] [x…] [, params [, weight]])` | `DOUBLE[]` training embedding (`TSne`, `Isomap`, `LocallyLinearEmbedding`, `ClassicalMds`, …) or encoding |
 
-Clustering kinds: `KMeans`, `MiniBatchKMeans`, `BisectingKMeans`, `Dbscan`, `Hdbscan`, `Optics`, `MeanShift` (bandwidth from `ml_estimate_bandwidth_agg`), `Birch`, `AffinityPropagation`, `AgglomerativeClustering`, `SpectralClustering`, `GaussianMixture`, `BayesianGaussianMixture`. Score a clustering with `ml_silhouette(x, label)`, or against truth with `ml_adjusted_rand` / `ml_normalized_mutual_info`.
+Clustering kinds: `KMeans`, `MiniBatchKMeans`, `BisectingKMeans`, `Dbscan`, `Hdbscan`, `Optics`, `MeanShift` (bandwidth from `ml_estimate_bandwidth_agg`), `Birch`, `AffinityPropagation`, `AgglomerativeClustering`, `SpectralClustering`, `GaussianMixture`, `BayesianGaussianMixture`. `Dbscan` also clusters on a precomputed distance: `"metric": "Precomputed"` and, per point, the list of its distances to every point in the same `ORDER BY` order (`list(dist ORDER BY other_id) … GROUP BY id`); Hdbscan / Optics / Agglomerative wait on sipemu/anofox-ml#276. Score a clustering with `ml_silhouette(x, label)`, or against truth with `ml_adjusted_rand` / `ml_normalized_mutual_info`.
 
 ```sql
 SELECT region, unnest(list(id ORDER BY id)) AS id,

@@ -182,6 +182,16 @@ typedef struct {
 } AnofoxMlRfeResult;
 char *anofox_ml_rfe(const char *kind, const char *params, const char *options, const double *x, size_t n_rows,
                     size_t n_cols, const double *y, const char *const *y_labels, size_t threads, AnofoxMlRfeResult *out);
+
+// Model selection `method` (learning_curve, validation_curve,
+// permutation_test, nested_cv, bootstrap_validate) for `kind` on n_rows x
+// n_cols rows: y holds doubles, or y_labels strings (the other NULL);
+// params / options are JSON (may be NULL). `texts` receives one string per
+// result row (parameters as JSON, or none), `values` the row-major table
+// and `cols` its width. Free both.
+char *anofox_ml_select(const char *method, const char *kind, const char *params, const char *options, const double *x,
+                       size_t n_rows, size_t n_cols, const double *y, const char *const *y_labels, size_t threads,
+                       AnofoxMlStrings *texts, AnofoxMlDoubles *values, size_t *cols);
 void anofox_ml_free_rfe_result(AnofoxMlRfeResult r);
 
 // A fitted array (first of the comma-separated keys found in the fitted

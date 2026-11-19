@@ -55,6 +55,8 @@ const METHODS: &[(&str, Needs)] = &[
     ("group_shuffle_split", Needs::Groups),
     ("group_time_series", Needs::Groups),
     ("stratified_group_kfold", Needs::YAndGroups),
+    ("bootstrap", Needs::Rows),
+    ("bootstrap_stratified", Needs::Y),
 ];
 
 impl Options {
@@ -148,6 +150,16 @@ fn splits(
         "stratified_group_kfold" => {
             sp::stratified_group_k_fold(y, groups, k, o.shuffle.unwrap_or(false).then_some(seed))?
         }
+        // Training rows are drawn with replacement (a row repeats once per
+        // draw); the test rows are the out-of-bag rows.
+        "bootstrap" => {
+            anofox_ml_core::validation::bootstrap_splits(n, o.n_splits.unwrap_or(100), seed)?
+        }
+        "bootstrap_stratified" => anofox_ml_core::validation::bootstrap_splits_stratified(
+            y,
+            o.n_splits.unwrap_or(100),
+            seed,
+        )?,
         _ => unreachable!("checked by the caller"),
     })
 }

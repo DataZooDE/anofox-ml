@@ -67,6 +67,7 @@ For custom loops, `ml_cv_splits_agg(id, method, options [, y [, groups]] ORDER B
 | `stratified_kfold`, `repeated_stratified_kfold`, `stratified_shuffle_split`, `stratified_kfold_continuous` | `y` | `n_splits`, `n_repeats`, `test_size`, `n_bins`, `seed` |
 | `group_kfold`, `leave_one_group_out`, `leave_p_groups_out`, `group_shuffle_split`, `group_time_series` | `groups` (pass `NULL` for `y`) | `n_splits`, `shuffle`, `seed`, `p`, `test_size` |
 | `stratified_group_kfold` | `y`, `groups` | `n_splits`, `shuffle`, `seed` |
+| `bootstrap`, `bootstrap_stratified` | — / `y` | `n_splits` (100), `seed`; training rows repeat once per draw, out-of-bag rows test |
 
 - Labels spanning time (forward returns, churn windows): `ml_purged_cv_splits_agg(id, t_start, t_end, method, options ORDER BY t_start)` with `purged_kfold` or `combinatorial_purged` (`embargo`, `n_groups`, `n_test_groups`; test rows carry a backtest `path`).
 - Spatial data: `ml_spatial_cv_splits_agg(id, coords DOUBLE[], method, options ORDER BY id)` with `spatial_block_kfold` (`block_size`), `kfold` or `buffered_loo` (`buffer`); `metric` `"haversine"` for `[lat, lon]`.
@@ -78,6 +79,16 @@ WITH folds AS (SELECT unnest(ml_cv_splits_agg(id, 'time_series', '{"n_splits": 4
 SELECT split, ml_rmse(units, ml_predict(model, [price, promo, dow])) AS rmse
 FROM f JOIN m USING (split) WHERE role = 'test' GROUP BY split ORDER BY split;
 ```
+
+## Model selection
+
+`(kind, y, [x…] [, params [, options]])` aggregates; options `cv` (5), `metric`, `metric_options`, `seed`, `stratify`:
+
+- `ml_learning_curve_agg` → `STRUCT(train_size, train_score, train_score_std, test_score, test_score_std)[]` (`train_sizes` fractions).
+- `ml_validation_curve_agg` → one row per `param_grid` set (list of objects or object of lists), with `params`.
+- `ml_permutation_test_agg` → `STRUCT(score, p_value, permutation_scores)` (`n_permutations` 100): is the CV score better than chance?
+- `ml_nested_cv_agg` → `STRUCT(score, score_std, folds)`: unbiased estimate of a grid search (`param_grid`, `inner_cv` 3).
+- `ml_bootstrap_validate_agg` → apparent, out-of-bag, .632, .632+, optimism-corrected (Harrell) on the metric's scale (`n_bootstraps` 200).
 
 ## Hyperparameter search
 

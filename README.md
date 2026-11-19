@@ -425,6 +425,18 @@ Aggregates over `(y_true, y_pred)`: no model is needed, so they score any predic
 | `ml_brier_score(y, p [, options [, weight]])`, `ml_average_precision(y, score)` | Binary probabilities and scores |
 | `ml_adjusted_rand`, `ml_normalized_mutual_info` `(labels_true, labels_pred)`, `ml_silhouette(x DOUBLE[], label)` | Clustering |
 | `ml_coverage(y, lower, upper)`, `ml_interval_score(y, lower, upper, alpha)` | Prediction intervals |
+| `ml_confusion_matrix(y, y_pred [, options [, weight]])` | `STRUCT(labels VARCHAR[], matrix DOUBLE[][])`: true classes in rows, predicted in columns, labels sorted (or the `labels` option's order). `DOUBLE` or `VARCHAR` labels |
+| `ml_classification_report(y, y_pred [, options [, weight]])` | One `STRUCT(label, precision, recall, f1, support)` per class (`DOUBLE` or `VARCHAR` labels); options `labels`, `beta`, `zero_division` |
+| `ml_roc_curve(y, score)`, `ml_precision_recall_curve(y, score)` | Binary 0/1 `y`: a list of `STRUCT(threshold, fpr, tpr)` (thresholds descending, from a sentinel above the top score) or `STRUCT(threshold, precision, recall)` (thresholds ascending; the final point `(1, 0)` has a NULL threshold) |
+
+```sql
+SELECT ml_confusion_matrix(label, ml_predict_label(model, [price, promo, dow])) AS cm
+FROM test, (SELECT ml_fit_agg('RandomForestClassifier', label, [price, promo, dow]) AS model FROM train);
+SELECT r.threshold, r.fpr, r.tpr
+FROM (SELECT unnest(ml_roc_curve(churned, ml_predict_proba(model, [tenure, calls])[2])) AS r
+      FROM customers, (SELECT ml_fit_agg('LogisticRegressor', churned, [tenure, calls]) AS model FROM customers))
+LIMIT 5;
+```
 
 ### Cross-Validation
 

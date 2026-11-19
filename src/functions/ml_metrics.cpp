@@ -1,6 +1,7 @@
 // Metric aggregates of the anofox_ml extension (ml_r2, ml_f1, ml_roc_auc, ...):
 // collect the group, then call anofox_ml_metric once in finalize.
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -299,6 +300,97 @@ void MetricFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &r
     }
 }
 
+// Table-valued metrics: the same state, one nested value per group.
+LogicalType TableMetricType(const std::string &name) {
+    const auto D = LogicalType(LogicalTypeId::DOUBLE), V = LogicalType(LogicalTypeId::VARCHAR);
+    child_list_t<LogicalType> f;
+    if (name == "confusion_matrix") {
+        f = {{"labels", LogicalType::LIST(V)}, {"matrix", LogicalType::LIST(LogicalType::LIST(D))}};
+        return LogicalType::STRUCT(std::move(f));
+    }
+    if (name == "classification_report") {
+        f = {{"label", V}, {"precision", D}, {"recall", D}, {"f1", D}, {"support", D}};
+    } else if (name == "roc_curve") {
+        f = {{"threshold", D}, {"fpr", D}, {"tpr", D}};
+    } else {
+        f = {{"threshold", D}, {"precision", D}, {"recall", D}};
+    }
+    return LogicalType::LIST(LogicalType::STRUCT(std::move(f)));
+}
+
+void TableMetricFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count,
+                         idx_t offset) {
+    auto &metric = aggr.bind_data->Cast<MetricBindData>().metric;
+    const std::string name = metric.name;
+    auto states = FlatVector::GetData<MetricState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        AnofoxMlStrings labels {nullptr, 0};
+        AnofoxMlDoubles values {nullptr, 0};
+        size_t cols = 0;
+        char *err;
+        if (!s.yl->empty()) {
+            std::vector<const char *> yt, yp;
+            for (idx_t r = 0; r < s.yl->size(); r++) {
+                yt.push_back((*s.yl)[r].c_str());
+                yp.push_back((*s.pl)[r].c_str());
+            }
+            err = anofox_ml_metric_table_labels(metric.name, s.options->c_str(), yt.data(), yp.data(), yt.size(),
+                                                s.has_w ? s.w->data() : nullptr, &labels, &values, &cols);
+        } else if (s.y->empty()) {
+            FlatVector::SetNull(result, row, true); // empty group
+            continue;
+        } else {
+            err = anofox_ml_metric_table(metric.name, s.options->c_str(), s.y->data(), s.p->data(), s.y->size(),
+                                         s.has_w ? s.w->data() : nullptr, &labels, &values, &cols);
+        }
+        if (err) {
+            std::string msg(err);
+            anofox_ml_free_string(err);
+            throw InvalidInputException("%s: %s", metric.function, msg);
+        }
+        auto number = [](double v) { return std::isnan(v) ? Value(LogicalType(LogicalTypeId::DOUBLE)) : Value::DOUBLE(v); };
+        const idx_t n_rows = cols ? values.len / cols : 0;
+        vector<Value> names;
+        for (idx_t r = 0; r < labels.len; r++) {
+            names.push_back(Value(labels.data[r]));
+        }
+        Value out;
+        if (name == "confusion_matrix") {
+            vector<Value> matrix;
+            for (idx_t r = 0; r < n_rows; r++) {
+                vector<Value> cells;
+                for (idx_t c = 0; c < cols; c++) {
+                    cells.push_back(Value::DOUBLE(values.data[r * cols + c]));
+                }
+                matrix.push_back(Value::LIST(LogicalType(LogicalTypeId::DOUBLE), std::move(cells)));
+            }
+            out = Value::STRUCT({{"labels", Value::LIST(LogicalType(LogicalTypeId::VARCHAR), std::move(names))},
+                                 {"matrix", Value::LIST(LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE)),
+                                                        std::move(matrix))}});
+        } else {
+            auto type = TableMetricType(name);
+            auto &fields = StructType::GetChildTypes(ListType::GetChildType(type));
+            vector<Value> rows;
+            for (idx_t r = 0; r < n_rows; r++) {
+                child_list_t<Value> v;
+                if (name == "classification_report") {
+                    v.emplace_back(fields[0].first, names[r]);
+                }
+                for (idx_t k = 0; k < cols; k++) {
+                    v.emplace_back(fields[v.size()].first, number(values.data[r * cols + k]));
+                }
+                rows.push_back(Value::STRUCT(std::move(v)));
+            }
+            out = Value::LIST(ListType::GetChildType(type), std::move(rows));
+        }
+        anofox_ml_free_strings(labels);
+        anofox_ml_free_doubles(values);
+        result.SetValue(row, out);
+    }
+}
+
 } // anonymous namespace
 
 void RegisterMlMetrics(ExtensionLoader &loader) {
@@ -403,6 +495,36 @@ void RegisterMlMetrics(ExtensionLoader &loader) {
             add({D, D, D}, MetricUpdate<Shape::INTERVAL, false>);
             add({D, D, D, D}, MetricUpdate<Shape::INTERVAL, false>);
             break;
+        }
+        loader.RegisterFunction(set);
+    }
+
+    // Table-valued metrics: (y, pred [, options [, weight]]) with numeric or
+    // VARCHAR classes; the curves take (y DOUBLE, score DOUBLE).
+    const Metric tables[] = {{"ml_confusion_matrix", "confusion_matrix"},
+                             {"ml_classification_report", "classification_report"},
+                             {"ml_roc_curve", "roc_curve"},
+                             {"ml_precision_recall_curve", "precision_recall_curve"}};
+    for (const auto &metric : tables) {
+        const bool curve = std::string(metric.name).find("curve") != std::string::npos;
+        const auto type = TableMetricType(metric.name);
+        AggregateFunctionSet set(metric.function);
+        auto add = [&](vector<LogicalType> args, aggregate_update_t update) {
+            AggregateFunction f(metric.function, std::move(args), type, AggregateFunction::StateSize<MetricState>,
+                                compat::StateInit<MetricInitialize>, update, MetricCombine, TableMetricFinalize,
+                                FunctionNullHandling::SPECIAL_HANDLING, nullptr, compat::AggregateBind<MetricBind>,
+                                MetricDestroy);
+            compat::SetFunctionInfo(f, make_shared_ptr<MetricFunctionInfo>(metric));
+            f.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+            set.AddFunction(f);
+        };
+        add({D, D}, MetricUpdate<Shape::PAIR, false>);
+        if (!curve) {
+            add({D, D, V}, MetricUpdate<Shape::PAIR, false>);
+            add({D, D, V, D}, MetricUpdate<Shape::PAIR, false>);
+            add({V, V}, LabelMetricUpdate);
+            add({V, V, V}, LabelMetricUpdate);
+            add({V, V, V, D}, LabelMetricUpdate);
         }
         loader.RegisterFunction(set);
     }

@@ -105,6 +105,20 @@ void anofox_ml_free_splits(AnofoxMlSplits s);
 char *anofox_ml_metric_labels(const char *name, const char *options, const char *const *y_true,
                               const char *const *y_pred, size_t n, const double *w, double *out);
 
+// Table-valued metric `name` (confusion_matrix, classification_report,
+// roc_curve, precision_recall_curve) on n numeric rows: `labels` receives
+// the class labels as text (empty for the curves), `values` an
+// n_rows * cols row-major table. Free both.
+char *anofox_ml_metric_table(const char *name, const char *options, const double *y_true, const double *y_pred,
+                             size_t n, const double *w, AnofoxMlStrings *labels, AnofoxMlDoubles *values,
+                             size_t *cols);
+
+// anofox_ml_metric_table on string class labels (confusion_matrix,
+// classification_report).
+char *anofox_ml_metric_table_labels(const char *name, const char *options, const char *const *y_true,
+                                    const char *const *y_pred, size_t n, const double *w, AnofoxMlStrings *labels,
+                                    AnofoxMlDoubles *values, size_t *cols);
+
 // Split conformal prediction: calibrate a model BLOB on held-out rows (y as
 // doubles, or string labels for a model fitted on labels); `out` receives the
 // calibrated BLOB. Intervals: n_rows x 2 doubles (lower, upper). Sets: the

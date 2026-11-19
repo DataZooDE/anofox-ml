@@ -1,0 +1,75 @@
+# name: test/sql/ml_model_interchange.test
+# description: ml_model_export / ml_model_import: plain anofox-ml registry bytes
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+statement ok
+CREATE TABLE t AS
+SELECT i, (i % 10)::DOUBLE AS a, (hash(i) % 100)::DOUBLE / 100 AS b,
+       CASE WHEN i % 10 < 5 THEN 'low' ELSE 'high' END AS label,
+       (i % 10 >= 5)::INT::DOUBLE AS cls
+FROM range(200) r(i);
+
+statement ok
+CREATE TABLE m AS
+SELECT ml_fit_agg('OlsRegressor', a * 2 + b, [a, b]) AS reg,
+       ml_fit_agg('LogisticRegressor', cls, [a, b]) AS logit,
+       ml_fit_agg('RandomForestClassifier', label, [a, b], '{"n_estimators": 5, "seed": 1}') AS forest
+FROM t;
+
+# export, then import with the feature count: identical predictions
+statement ok
+CREATE TABLE back AS
+SELECT ml_model_import('OlsRegressor', ml_model_export(reg), 2) AS reg,
+       ml_model_import('LogisticRegressor', ml_model_export(logit), 2) AS logit,
+       ml_model_import(ml_model_kind(forest), ml_model_export(forest), 2, ['high', 'low']) AS forest
+FROM m;
+
+query III
+SELECT bool_and(ml_predict(m.reg, [a, b]) = ml_predict(back.reg, [a, b])),
+       bool_and(ml_predict_proba(m.logit, [a, b]) = ml_predict_proba(back.logit, [a, b])),
+       bool_and(ml_predict_label(m.forest, [a, b]) = ml_predict_label(back.forest, [a, b]))
+FROM t, m, back;
+----
+true	true	true
+
+# the classes of the logistic model come from its fitted state
+query I
+SELECT ml_model_info(logit).classes FROM back;
+----
+[0.0, 1.0]
+
+# the exported bytes are the registry's, without the extension header
+query I
+SELECT octet_length(ml_model_export(reg)) < octet_length(reg) FROM m;
+----
+true
+
+statement error
+SELECT ml_model_import('OlsRegressor', ml_model_export(logit), 2) FROM m;
+----
+ml_model_import
+
+statement error
+SELECT ml_predict(ml_model_import('OlsRegressor', ml_model_export(reg), 3), [a, b]) FROM t, m;
+----
+fitted on 3 features
+
+statement error
+SELECT ml_model_import('RandomForestClassifier', ml_model_export(forest), 2, ['low', 'high']) FROM m;
+----
+sorted
+
+statement error
+SELECT ml_model_export(ml_conformalize_agg(reg, a * 2 + b, [a, b])) FROM t, m;
+----
+conformalized
+
+query I
+SELECT ml_model_import(NULL, NULL::BLOB, 2) IS NULL;
+----
+true

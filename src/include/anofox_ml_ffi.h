@@ -282,6 +282,16 @@ char *anofox_ml_kinds(char **out);
 char *anofox_ml_kind_capabilities(const char *kind, char **out);   // methods separated by '\n'                                   // kinds separated by '\n'
 char *anofox_ml_default_params(const char *kind, char **out);        // JSON
 char *anofox_ml_estimators_json(char **out);                         // [{kind, default_params}]
+// The registry bytes of a model BLOB (DynModel::to_bytes: loadable in Rust
+// with anofox_ml_registry::load(kind, bytes)). Free `out`.
+char *anofox_ml_model_export(const uint8_t *model, size_t model_len, AnofoxMlBytes *out);
+
+// A model BLOB from registry bytes of `kind` with n_features features;
+// `classes` (doubles) or `labels` (sorted strings), n_classes each, give a
+// classifier's classes and may be NULL. Free `out`.
+char *anofox_ml_model_import(const char *kind, const uint8_t *bytes, size_t len, size_t n_features,
+                             const double *classes, const char *const *labels, size_t n_classes, AnofoxMlBytes *out);
+
 char *anofox_ml_model_kind(const uint8_t *model, size_t model_len, char **out);
 char *anofox_ml_model_fitted(const uint8_t *model, size_t model_len, char **out); // fitted state as JSON
 const char *anofox_ml_ffi_version(void);

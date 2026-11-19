@@ -77,6 +77,67 @@ void MlModelKindFunction(DataChunk &args, ExpressionState &state, Vector &result
 }
 
 //===--------------------------------------------------------------------===//
+// ml_model_export(model BLOB) -> BLOB: the anofox-ml registry bytes
+// ml_model_import(kind VARCHAR, bytes BLOB, n_features INTEGER [, classes DOUBLE[] | labels VARCHAR[]]) -> BLOB
+//===--------------------------------------------------------------------===//
+void MlModelExportFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t blob) {
+        AnofoxMlBytes out {nullptr, 0};
+        Check(anofox_ml_model_export(reinterpret_cast<const uint8_t *>(blob.GetData()), blob.GetSize(), &out),
+              "ml_model_export");
+        auto s = StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(out.data), out.len);
+        anofox_ml_free_bytes(out);
+        return s;
+    });
+}
+
+void MlModelImportFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    const bool has_classes = args.ColumnCount() > 3;
+    const bool labels = has_classes && ListType::GetChildType(args.data[3].GetType()).id() == LogicalTypeId::VARCHAR;
+    result.SetVectorType(VectorType::FLAT_VECTOR);
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto kind = args.data[0].GetValue(i), bytes = args.data[1].GetValue(i), n = args.data[2].GetValue(i);
+        Value classes = has_classes ? args.data[3].GetValue(i) : Value();
+        if (kind.IsNull() || bytes.IsNull() || n.IsNull() || n.GetValue<int64_t>() < 0) {
+            FlatVector::SetNull(result, i, true);
+            continue;
+        }
+        std::vector<double> numbers;
+        std::vector<std::string> names;
+        std::vector<const char *> name_ptrs;
+        if (!classes.IsNull()) {
+            for (const auto &c : ListValue::GetChildren(classes)) {
+                if (c.IsNull()) {
+                    throw InvalidInputException("ml_model_import: a class is NULL");
+                }
+                if (labels) {
+                    names.push_back(c.GetValue<std::string>());
+                } else {
+                    numbers.push_back(c.GetValue<double>());
+                }
+            }
+            for (const auto &s : names) {
+                name_ptrs.push_back(s.c_str());
+            }
+        }
+        const auto &raw = StringValue::Get(bytes);
+        const auto k = kind.GetValue<std::string>();
+        AnofoxMlBytes out {nullptr, 0};
+        Check(anofox_ml_model_import(k.c_str(), reinterpret_cast<const uint8_t *>(raw.data()), raw.size(),
+                                     n.GetValue<int64_t>(), !classes.IsNull() && !labels ? numbers.data() : nullptr,
+                                     !classes.IsNull() && labels ? name_ptrs.data() : nullptr,
+                                     labels ? names.size() : numbers.size(), &out),
+              "ml_model_import");
+        compat::FlatData<string_t>(result)[i] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(out.data), out.len);
+        anofox_ml_free_bytes(out);
+    }
+    if (args.AllConstant()) {
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_estimators() -> TABLE(kind VARCHAR, default_params VARCHAR, capabilities VARCHAR[])
 //===--------------------------------------------------------------------===//
 struct EstimatorsState : public GlobalTableFunctionState {
@@ -2076,6 +2137,15 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     const auto BL = LogicalType(LogicalTypeId::BLOB), DL = LogicalType(LogicalTypeId::DOUBLE);
     const auto VL = LogicalType(LogicalTypeId::VARCHAR);
     loader.RegisterFunction(Fallible(ScalarFunction("ml_model_kind", {BL}, VL, MlModelKindFunction)));
+    loader.RegisterFunction(Fallible(ScalarFunction("ml_model_export", {BL}, BL, MlModelExportFunction)));
+    {
+        ScalarFunctionSet import_set("ml_model_import");
+        const auto IL = LogicalType(LogicalTypeId::BIGINT);
+        import_set.AddFunction(Fallible(ScalarFunction({VL, BL, IL}, BL, MlModelImportFunction)));
+        import_set.AddFunction(Fallible(ScalarFunction({VL, BL, IL, LogicalType::LIST(DL)}, BL, MlModelImportFunction)));
+        import_set.AddFunction(Fallible(ScalarFunction({VL, BL, IL, LogicalType::LIST(VL)}, BL, MlModelImportFunction)));
+        loader.RegisterFunction(import_set);
+    }
     {
         ScalarFunctionSet kn("ml_kneighbors");
         const auto XL = LogicalType::LIST(LogicalType(LogicalTypeId::DOUBLE));

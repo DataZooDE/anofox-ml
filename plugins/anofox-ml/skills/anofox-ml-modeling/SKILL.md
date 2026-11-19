@@ -91,6 +91,7 @@ SELECT ml_coefficients(ml_fit_agg('OlsRegressor', units, [price, promo], '{}', 1
 | `ml_feature_importances(model)` | impurity importances of tree / boosting / bagging kinds, sum 1 |
 | `ml_cluster_centers(model)`, `ml_explained_variance_ratio(model)` | centroids; PCA-like variance ratios |
 | `ml_model_fitted(model)` | the whole fitted state as JSON (arrays as `{"v","dim","data"}`) |
+| `ml_model_export(model)` / `ml_model_import(kind, bytes, n_features [, classes \| labels])` | plain anofox-ml registry bytes, to and from Rust (`anofox_ml_registry::load(kind, &bytes)` / `DynModel::to_bytes`) |
 | `ml_kneighbors(model, x [, k])` | `STRUCT(indices, distances)` of a kNN model's nearest training rows, 0-based in fit input order (fit with `ORDER BY` to map back) |
 
 For model-agnostic importance use `ml_permutation_importance_agg` (evaluation skill). For p-values and standard errors use `OlsRegressor` / `RidgeRegressor` with `{"inference": true}` (coefficient table under `summary` in `ml_model_fitted`), or the anofox_statistics extension.

@@ -5,6 +5,7 @@
 ### Added
 - `ml_fit_with_features_agg(kind, y, x, text, embeddings [, params [, weight]])` and `ml_predict` / `ml_predict_label` / `ml_predict_proba(model, x, text, embeddings)`: CatBoost text features (`VARCHAR[]`) and embedding features (`DOUBLE[][]`) besides the numeric ones (#95).
 - `ml_confusion_matrix`, `ml_classification_report`, `ml_roc_curve` and `ml_precision_recall_curve`: table-valued metric aggregates, matching scikit-learn (#98).
+- `ml_model_export(model)` and `ml_model_import(kind, bytes, n_features [, classes | labels])`: move models to and from anofox-ml in Rust as plain registry bytes (#100).
 
 ## [0.3.0] - 2026-11-12
 

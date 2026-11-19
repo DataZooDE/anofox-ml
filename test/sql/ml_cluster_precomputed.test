@@ -1,0 +1,21 @@
+# name: test/sql/ml_cluster_precomputed.test
+# description: clustering on a precomputed distance matrix (Dbscan, "metric": "Precomputed")
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# three groups of five points on a line; each point passes its row of distances
+query I
+WITH p AS (SELECT i, (i // 5) * 10.0 + i % 5 AS v FROM range(15) r(i)),
+     d AS (SELECT a.i, list(abs(a.v - b.v) ORDER BY b.i) AS dist FROM p a, p b GROUP BY a.i)
+SELECT ml_cluster_agg('Dbscan', dist, '{"eps": 3, "min_samples": 2, "metric": "Precomputed"}' ORDER BY i) FROM d;
+----
+[0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2]
+
+# a non-square matrix is an error
+statement error
+SELECT ml_cluster_agg('Dbscan', [1.0, 2.0], '{"metric": "Precomputed"}') FROM range(3);
+----

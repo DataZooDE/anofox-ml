@@ -18,6 +18,7 @@ use std::hash::{Hash, Hasher};
 mod conformal;
 mod cv;
 mod encode;
+mod features;
 mod impute;
 mod inspect;
 mod metrics;
@@ -58,6 +59,10 @@ struct Meta {
     /// PLS, multi-output, multi-task); `n_features` is then the width of `X`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     y_columns: Option<usize>,
+    /// Text columns and embedding widths of a model fitted with
+    /// `ml_fit_with_features_agg` (see [`features`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    side: Option<features::Side>,
 }
 
 /// Cached decoded model: (BLOB hash, BLOB length, metadata, model).
@@ -536,6 +541,7 @@ fn encode_fitted(
         conformity: None,
         encoder: None,
         y_columns,
+        side: None,
     };
     Ok(encode(&meta, &bytes))
 }
@@ -1405,6 +1411,15 @@ fn apply_impl(blob: &[u8], method: &str, x: ArrayView2<f64>) -> Result<(Vec<f64>
         return Err(format!("unknown method '{method}' (known: {METHODS:?})"));
     }
     with_model(blob, |meta, model| {
+        if let Some(side) = &meta.side {
+            return Err(format!(
+                "{} was fitted with {} text and {} embedding columns: pass them, \
+                 e.g. ml_predict(model, x, text, embeddings)",
+                meta.kind,
+                side.text,
+                side.embeddings.len()
+            ));
+        }
         if method == "transform" && model.capabilities().contains(&"transform_text") {
             return Err(format!(
                 "{} encodes documents: use ml_transform(model, text VARCHAR)",
@@ -2339,6 +2354,7 @@ mod tests {
             conformity: None,
             encoder: None,
             y_columns: None,
+            side: None,
         };
         assert_eq!(label_of(&meta, 1.0).unwrap(), "1");
         assert_eq!(label_of(&meta, -2.5).unwrap(), "-2.5");

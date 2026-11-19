@@ -1,6 +1,7 @@
 // SQL functions of the anofox_ml extension: thin wrappers over the generic
 // C ABI in anofox_ml_ffi.h (estimator registry of anofox-ml).
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -160,6 +161,13 @@ struct FitState {
     std::string *options; // ml_tune_agg options
     std::vector<uint8_t> *val; // per used row: 1 = validation row (ml_fit_with_validation_agg)
     std::vector<double> *off;  // per used row: offset on the link scale (ml_fit_with_offset_agg)
+    // ml_fit_with_features_agg: text columns (row-major) and embedding values
+    // (row-major, a row's embedding columns one after the other).
+    std::vector<std::string> *texts;
+    std::vector<double> *emb;
+    std::vector<size_t> *dims;
+    idx_t n_text;
+    bool has_side;
     // One entry per input row: 1 when the row was used for fitting. Lets the
     // per-row aggregates (ml_cluster_agg, ...) return NULL for skipped rows.
     std::vector<uint8_t> *used;
@@ -186,6 +194,11 @@ void FitInitialize(FitState &s) {
     s.used = new std::vector<uint8_t>();
     s.val = new std::vector<uint8_t>();
     s.off = new std::vector<double>();
+    s.texts = new std::vector<std::string>();
+    s.emb = new std::vector<double>();
+    s.dims = new std::vector<size_t>();
+    s.n_text = 0;
+    s.has_side = false;
 }
 
 void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
@@ -204,6 +217,9 @@ void FitDestroy(Vector &state_vector, AggregateInputData &, idx_t count) {
         delete s.used;
         delete s.val;
         delete s.off;
+        delete s.texts;
+        delete s.emb;
+        delete s.dims;
     }
 }
 
@@ -259,16 +275,74 @@ void CheckFitSize(const AggregateInputData &aggr, idx_t n_values) {
     }
 }
 
+// Text (VARCHAR[]) and embedding (DOUBLE[][]) columns of
+// ml_fit_with_features_agg and the matching ml_predict* overloads.
+struct SideReader {
+    UnifiedVectorFormat text_data, text_child, emb_data, emb_child, emb_values;
+
+    SideReader(Vector &text, Vector &emb, idx_t count) {
+        text.ToUnifiedFormat(count, text_data);
+        compat::ListChild(text).ToUnifiedFormat(ListVector::GetListSize(text), text_child);
+        emb.ToUnifiedFormat(count, emb_data);
+        auto &lists = compat::ListChild(emb);
+        auto n_lists = ListVector::GetListSize(emb);
+        lists.ToUnifiedFormat(n_lists, emb_child);
+        compat::ListChild(lists).ToUnifiedFormat(ListVector::GetListSize(lists), emb_values);
+    }
+
+    // Append row i's texts and embedding values and set its embedding widths;
+    // false (nothing appended) when a list or an element is NULL.
+    bool Read(idx_t i, std::vector<std::string> &texts, std::vector<double> &emb, std::vector<size_t> &dims) {
+        auto ti = text_data.sel->get_index(i);
+        auto ei = emb_data.sel->get_index(i);
+        if (!text_data.validity.RowIsValid(ti) || !emb_data.validity.RowIsValid(ei)) {
+            return false;
+        }
+        const auto &t = UnifiedVectorFormat::GetData<list_entry_t>(text_data)[ti];
+        const auto &e = UnifiedVectorFormat::GetData<list_entry_t>(emb_data)[ei];
+        if (HasNullElement(text_child, t) || HasNullElement(emb_child, e)) {
+            return false;
+        }
+        auto inner = UnifiedVectorFormat::GetData<list_entry_t>(emb_child);
+        for (idx_t j = 0; j < e.length; j++) {
+            const auto &v = inner[emb_child.sel->get_index(e.offset + j)];
+            if (v.length == 0 || HasNullElement(emb_values, v)) {
+                return false;
+            }
+        }
+        auto strs = UnifiedVectorFormat::GetData<string_t>(text_child);
+        for (idx_t j = 0; j < t.length; j++) {
+            texts.push_back(strs[text_child.sel->get_index(t.offset + j)].GetString());
+        }
+        auto values = UnifiedVectorFormat::GetData<double>(emb_values);
+        dims.clear();
+        for (idx_t j = 0; j < e.length; j++) {
+            const auto &v = inner[emb_child.sel->get_index(e.offset + j)];
+            dims.push_back(v.length);
+            for (idx_t k = 0; k < v.length; k++) {
+                emb.push_back(values[emb_values.sel->get_index(v.offset + k)]);
+            }
+        }
+        return true;
+    }
+
+    idx_t TextLength(idx_t i) {
+        auto ti = text_data.sel->get_index(i);
+        return UnifiedVectorFormat::GetData<list_entry_t>(text_data)[ti].length;
+    }
+};
+
 // Inputs: kind, [y,] x [, params [, weight]]; y is a string label when LABELS.
 // With UNLABELLED, a NULL y of a semi-supervised kind is kept as an
 // unlabelled row (y = -1, or a NULL label) instead of skipping the row.
 // With HAS_VAL, a BOOLEAN validation flag follows x; with HAS_OFF, a DOUBLE
-// offset (rows with a NULL flag or offset are skipped).
+// offset (rows with a NULL flag or offset are skipped). With HAS_SIDE, a
+// VARCHAR[] of texts and a DOUBLE[][] of embeddings follow x.
 template <bool HAS_Y, bool HAS_W = false, bool LABELS = false, bool UNLABELLED = true, bool HAS_VAL = false,
-          bool HAS_OFF = false>
+          bool HAS_OFF = false, bool HAS_SIDE = false>
 void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vector &state_vector, idx_t count) {
     constexpr idx_t X = HAS_Y ? 2 : 1;
-    constexpr idx_t P = X + 1 + (HAS_VAL || HAS_OFF ? 1 : 0); // params, then weight
+    constexpr idx_t P = X + 1 + (HAS_VAL || HAS_OFF ? 1 : 0) + (HAS_SIDE ? 2 : 0); // params, then weight
     UnifiedVectorFormat kind_data, y_data, x_data, val_data, params_data, w_data, sdata;
     inputs[0].ToUnifiedFormat(count, kind_data);
     if (HAS_Y) {
@@ -286,6 +360,11 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         inputs[P + 1].ToUnifiedFormat(count, w_data);
     }
     state_vector.ToUnifiedFormat(count, sdata);
+    unique_ptr<SideReader> side;
+    std::vector<size_t> dims;
+    if (HAS_SIDE) {
+        side = make_uniq<SideReader>(inputs[X + 1], inputs[X + 2], count);
+    }
 
     auto kinds = UnifiedVectorFormat::GetData<string_t>(kind_data);
     auto lists = UnifiedVectorFormat::GetData<list_entry_t>(x_data);
@@ -315,8 +394,19 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
             s.used->push_back(0);
             continue;
         }
+        // Read the side inputs first: a NULL among them skips the row.
+        const idx_t n_texts = s.texts->size();
+        if (HAS_SIDE && !side->Read(i, *s.texts, *s.emb, dims)) {
+            s.used->push_back(0);
+            continue;
+        }
         if (!s.initialized) {
             s.initialized = true;
+            s.has_side = HAS_SIDE;
+            if (HAS_SIDE) {
+                s.n_text = side->TextLength(i);
+                *s.dims = dims;
+            }
             s.has_y = HAS_Y;
             s.has_w = HAS_W;
             s.has_labels = LABELS;
@@ -332,6 +422,11 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         if (entry.length != s.n_cols) {
             throw InvalidInputException("ml_fit_agg: every feature list must have %llu values, got %llu",
                                         (unsigned long long)s.n_cols, (unsigned long long)entry.length);
+        }
+        if (HAS_SIDE && (s.texts->size() - n_texts != s.n_text || dims != *s.dims)) {
+            throw InvalidInputException("ml_fit_with_features_agg: every row needs %llu texts and the same "
+                                        "embedding widths as the first row",
+                                        (unsigned long long)s.n_text);
         }
         for (idx_t j = 0; j < entry.length; j++) {
             s.x->push_back(values[child_data.sel->get_index(entry.offset + j)]);
@@ -354,7 +449,7 @@ void FitUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, Vec
         }
         s.n_rows++;
         s.used->push_back(1);
-        CheckFitSize(aggr, s.x->size());
+        CheckFitSize(aggr, s.x->size() + s.emb->size());
     }
 }
 
@@ -469,13 +564,20 @@ void FitCombine(Vector &source_vector, Vector &target_vector, AggregateInputData
             tgt.has_labels = src.has_labels;
             tgt.string_x = src.string_x;
             tgt.text_x = src.text_x;
+            tgt.has_side = src.has_side;
+            tgt.n_text = src.n_text;
+            *tgt.dims = *src.dims;
             *tgt.options = *src.options;
             *tgt.kind = *src.kind;
             *tgt.params = *src.params;
             tgt.n_cols = src.n_cols;
         } else if (tgt.n_cols != src.n_cols) {
             throw InvalidInputException("ml_fit_agg: feature lists of different lengths");
+        } else if (tgt.has_side && (tgt.n_text != src.n_text || *tgt.dims != *src.dims)) {
+            throw InvalidInputException("ml_fit_with_features_agg: text or embedding lists of different lengths");
         }
+        tgt.texts->insert(tgt.texts->end(), src.texts->begin(), src.texts->end());
+        tgt.emb->insert(tgt.emb->end(), src.emb->begin(), src.emb->end());
         tgt.x->insert(tgt.x->end(), src.x->begin(), src.x->end());
         tgt.y->insert(tgt.y->end(), src.y->begin(), src.y->end());
         tgt.w->insert(tgt.w->end(), src.w->begin(), src.w->end());
@@ -616,6 +718,45 @@ void FitGroupFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector 
         Check(anofox_ml_fit_group(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols, s.y->data(),
                                   s.has_w ? s.w->data() : nullptr, s.off->data(), FitThreads(aggr), &blob),
               "ml_fit_with_group_agg");
+        compat::FlatData<string_t>(result)[row] =
+            StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
+        anofox_ml_free_bytes(blob);
+    }
+}
+
+//===--------------------------------------------------------------------===//
+// ml_fit_with_features_agg(kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[], text VARCHAR[],
+//                          embeddings DOUBLE[][] [, params VARCHAR [, weight DOUBLE]]) -> BLOB
+// CatBoost's text and embedding features besides x; either list may be empty.
+//===--------------------------------------------------------------------===//
+void FitFeaturesFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count,
+                         idx_t offset) {
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse("ml_fit_with_features_agg");
+        std::vector<const char *> texts, labels;
+        texts.reserve(s.texts->size());
+        for (const auto &t : *s.texts) {
+            texts.push_back(t.c_str());
+        }
+        if (s.has_labels) {
+            labels.reserve(s.labels->size());
+            for (const auto &l : *s.labels) {
+                labels.push_back(l.c_str());
+            }
+        }
+        AnofoxMlBytes blob {nullptr, 0};
+        Check(anofox_ml_fit_features(s.kind->c_str(), s.params->c_str(), s.x->data(), s.n_rows, s.n_cols,
+                                     s.has_labels ? nullptr : s.y->data(), s.has_labels ? labels.data() : nullptr,
+                                     s.has_w ? s.w->data() : nullptr, texts.data(), s.n_text, s.emb->data(),
+                                     s.dims->data(), s.dims->size(), FitThreads(aggr), &blob),
+              "ml_fit_with_features_agg");
         compat::FlatData<string_t>(result)[row] =
             StringVector::AddStringOrBlob(result, reinterpret_cast<const char *>(blob.data), blob.len);
         anofox_ml_free_bytes(blob);
@@ -1549,6 +1690,133 @@ void MlPredictOffsetFunction(DataChunk &args, ExpressionState &state, Vector &re
 }
 
 //===--------------------------------------------------------------------===//
+// ml_predict / ml_predict_label / ml_predict_proba
+//   (model BLOB, x DOUBLE[], text VARCHAR[], embeddings DOUBLE[][])
+// Models fitted with ml_fit_with_features_agg; a NULL text or embedding gives
+// NULL. `call(model, x, rows, n_cols, texts, n_text, emb, dims)` runs one
+// batch of rows with equal text count and embedding widths.
+//===--------------------------------------------------------------------===//
+template <class CALL>
+void ApplyFeatures(DataChunk &args, const char *function, Vector &result, CALL &&call) {
+    SideReader side(args.data[2], args.data[3], args.size());
+    ApplyBatchedWith(args, function, result,
+                     [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols) {
+                         std::vector<idx_t> run;
+                         std::vector<double> rx, emb;
+                         std::vector<std::string> texts;
+                         std::vector<size_t> dims, row_dims;
+                         idx_t n_text = 0;
+                         auto flush = [&]() {
+                             if (!run.empty()) {
+                                 std::vector<const char *> t;
+                                 t.reserve(texts.size());
+                                 for (const auto &v : texts) {
+                                     t.push_back(v.c_str());
+                                 }
+                                 call(model, rx, run, n_cols, t, n_text, emb, dims);
+                             }
+                             run.clear();
+                             rx.clear();
+                             emb.clear();
+                             texts.clear();
+                         };
+                         for (idx_t r = 0; r < rows.size(); r++) {
+                             std::vector<std::string> row_texts;
+                             std::vector<double> row_emb;
+                             if (!side.Read(rows[r], row_texts, row_emb, row_dims)) {
+                                 FlatVector::SetNull(result, rows[r], true);
+                                 continue;
+                             }
+                             if (!run.empty() && (row_texts.size() != n_text || row_dims != dims)) {
+                                 flush();
+                             }
+                             n_text = row_texts.size();
+                             dims = row_dims;
+                             run.push_back(rows[r]);
+                             rx.insert(rx.end(), x.begin() + r * n_cols, x.begin() + (r + 1) * n_cols);
+                             texts.insert(texts.end(), row_texts.begin(), row_texts.end());
+                             emb.insert(emb.end(), row_emb.begin(), row_emb.end());
+                         }
+                         flush();
+                     });
+}
+
+void MlPredictFeaturesFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto out = compat::FlatData<double>(result);
+    ApplyFeatures(args, "ml_predict", result,
+                  [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols,
+                      std::vector<const char *> &texts, idx_t n_text, std::vector<double> &emb,
+                      std::vector<size_t> &dims) {
+                      AnofoxMlDoubles o {nullptr, 0};
+                      size_t cols = 0;
+                      Check(anofox_ml_apply_features(reinterpret_cast<const uint8_t *>(model.GetData()),
+                                                     model.GetSize(), "predict", x.data(), rows.size(), n_cols,
+                                                     texts.data(), n_text, emb.data(), dims.data(), dims.size(), &o,
+                                                     &cols),
+                            "ml_predict");
+                      if (cols != 1) {
+                          anofox_ml_free_doubles(o);
+                          throw InvalidInputException("ml_predict: the model predicts %llu targets per row",
+                                                      (unsigned long long)cols);
+                      }
+                      for (idx_t r = 0; r < rows.size(); r++) {
+                          out[rows[r]] = o.data[r];
+                      }
+                      anofox_ml_free_doubles(o);
+                  });
+}
+
+void MlPredictLabelFeaturesFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto out = compat::FlatData<string_t>(result);
+    ApplyFeatures(args, "ml_predict_label", result,
+                  [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols,
+                      std::vector<const char *> &texts, idx_t n_text, std::vector<double> &emb,
+                      std::vector<size_t> &dims) {
+                      AnofoxMlStrings labels {nullptr, 0};
+                      Check(anofox_ml_predict_labels_features(reinterpret_cast<const uint8_t *>(model.GetData()),
+                                                              model.GetSize(), x.data(), rows.size(), n_cols,
+                                                              texts.data(), n_text, emb.data(), dims.data(),
+                                                              dims.size(), &labels),
+                            "ml_predict_label");
+                      for (idx_t r = 0; r < rows.size(); r++) {
+                          out[rows[r]] = StringVector::AddString(result, labels.data[r]);
+                      }
+                      anofox_ml_free_strings(labels);
+                  });
+}
+
+void MlPredictProbaFeaturesFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    // Collect per row first: the list child vector is appended to in row order.
+    std::vector<std::pair<idx_t, std::vector<double>>> out;
+    ApplyFeatures(args, "ml_predict_proba", result,
+                  [&](string_t model, std::vector<double> &x, std::vector<idx_t> &rows, idx_t n_cols,
+                      std::vector<const char *> &texts, idx_t n_text, std::vector<double> &emb,
+                      std::vector<size_t> &dims) {
+                      AnofoxMlDoubles o {nullptr, 0};
+                      size_t cols = 0;
+                      Check(anofox_ml_apply_features(reinterpret_cast<const uint8_t *>(model.GetData()),
+                                                     model.GetSize(), "predict_proba", x.data(), rows.size(),
+                                                     n_cols, texts.data(), n_text, emb.data(), dims.data(),
+                                                     dims.size(), &o, &cols),
+                            "ml_predict_proba");
+                      for (idx_t r = 0; r < rows.size(); r++) {
+                          out.emplace_back(rows[r], std::vector<double>(o.data + r * cols, o.data + (r + 1) * cols));
+                      }
+                      anofox_ml_free_doubles(o);
+                  });
+    std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    auto entries = compat::FlatData<list_entry_t>(result);
+    idx_t offset = ListVector::GetListSize(result);
+    for (auto &r : out) {
+        entries[r.first] = list_entry_t(offset, r.second.size());
+        for (double d : r.second) {
+            ListVector::PushBack(result, Value::DOUBLE(d));
+        }
+        offset += r.second.size();
+    }
+}
+
+//===--------------------------------------------------------------------===//
 // ml_predict_proba / ml_decision_function / ml_transform /
 // ml_inverse_transform / ml_score_samples (model BLOB, x DOUBLE[]) -> DOUBLE[]
 //===--------------------------------------------------------------------===//
@@ -1828,14 +2096,22 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(Fallible(ScalarFunction("ml_covariance", {BL}, CovarianceType(), MlCovarianceFunction)));
     loader.RegisterFunction(Fallible(ScalarFunction("ml_model_fitted", {BL}, VL, MlModelFittedFunction)));
     const vector<LogicalType> model_and_x {BL, LogicalType::LIST(DL)};
+    const vector<LogicalType> model_x_side {BL, LogicalType::LIST(DL), LogicalType::LIST(VL),
+                                            LogicalType::LIST(LogicalType::LIST(DL))};
     {
         ScalarFunctionSet predict_set("ml_predict");
         predict_set.AddFunction(Fallible(ScalarFunction(model_and_x, DL, MlPredictFunction)));
         predict_set.AddFunction(
             Fallible(ScalarFunction({BL, LogicalType::LIST(DL), DL}, DL, MlPredictOffsetFunction)));
+        predict_set.AddFunction(Fallible(ScalarFunction(model_x_side, DL, MlPredictFeaturesFunction)));
         loader.RegisterFunction(predict_set);
     }
-    loader.RegisterFunction(Fallible(ScalarFunction("ml_predict_label", model_and_x, VL, MlPredictLabelFunction)));
+    {
+        ScalarFunctionSet label_set("ml_predict_label");
+        label_set.AddFunction(Fallible(ScalarFunction(model_and_x, VL, MlPredictLabelFunction)));
+        label_set.AddFunction(Fallible(ScalarFunction(model_x_side, VL, MlPredictLabelFeaturesFunction)));
+        loader.RegisterFunction(label_set);
+    }
     loader.RegisterFunction(Fallible(ScalarFunction("ml_predict_std", model_and_x, DL, MlPredictStdFunction)));
     const vector<LogicalType> model_x_alpha {BL, LogicalType::LIST(DL), DL};
     loader.RegisterFunction(
@@ -1920,8 +2196,15 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         }
     }
     loader.RegisterFunction(importance_set);
+    {
+        ScalarFunctionSet proba_set("ml_predict_proba");
+        proba_set.AddFunction(Fallible(ScalarFunction(model_and_x, LogicalType::LIST(DL),
+                                                      MakeListFunction("ml_predict_proba", "predict_proba"))));
+        proba_set.AddFunction(Fallible(ScalarFunction(model_x_side, LogicalType::LIST(DL), MlPredictProbaFeaturesFunction)));
+        loader.RegisterFunction(proba_set);
+    }
     const std::pair<const char *, const char *> list_functions[] = {
-        {"ml_predict_proba", "predict_proba"}, {"ml_decision_function", "decision_function"},
+        {"ml_decision_function", "decision_function"},
 {"ml_predict_log_proba", "predict_log_proba"}, {"ml_inverse_transform", "inverse_transform"},
         {"ml_transform_y", "transform_y"}, {"ml_predict_targets", "predict"},
         {"ml_score_samples", "score_samples"}, {"ml_staged_predict", "staged_predict"},
@@ -2045,6 +2328,27 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
     group_set.AddFunction(make_group({V, D, features, D, V}, FitUpdate<true, false, false, false, false, true>));
     group_set.AddFunction(make_group({V, D, features, D, V, D}, FitUpdate<true, true, false, false, false, true>));
     loader.RegisterFunction(group_set);
+
+    AggregateFunctionSet features_set("ml_fit_with_features_agg");
+    auto make_features = [](vector<LogicalType> args, aggregate_update_t update) {
+        AggregateFunction f("ml_fit_with_features_agg", std::move(args), LogicalType(LogicalTypeId::BLOB),
+                            AggregateFunction::StateSize<FitState>, compat::StateInit<FitInitialize>, update,
+                            FitCombine, FitFeaturesFinalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+        f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+        return f;
+    };
+    const auto texts = LogicalType::LIST(V), embeddings = LogicalType::LIST(features);
+    for (bool labels : {false, true}) {
+        const auto y = labels ? V : D;
+        auto plain = labels ? FitUpdate<true, false, true, false, false, false, true>
+                            : FitUpdate<true, false, false, false, false, false, true>;
+        auto weighted = labels ? FitUpdate<true, true, true, false, false, false, true>
+                               : FitUpdate<true, true, false, false, false, false, true>;
+        features_set.AddFunction(make_features({V, y, features, texts, embeddings}, plain));
+        features_set.AddFunction(make_features({V, y, features, texts, embeddings, V}, plain));
+        features_set.AddFunction(make_features({V, y, features, texts, embeddings, V, D}, weighted));
+    }
+    loader.RegisterFunction(features_set);
 
     using Overload = std::pair<vector<LogicalType>, aggregate_update_t>;
     auto make_rows = [&](const char *name, LogicalType result, aggregate_finalize_t finalize,

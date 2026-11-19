@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `ml_fit_with_features_agg(kind, y, x, text, embeddings [, params [, weight]])` and `ml_predict` / `ml_predict_label` / `ml_predict_proba(model, x, text, embeddings)`: CatBoost text features (`VARCHAR[]`) and embedding features (`DOUBLE[][]`) besides the numeric ones (#95).
+
 ## [0.3.0] - 2026-11-12
 
 Built for **DuckDB v1.5.6** and **v2.0.0**, with [anofox-ml](https://github.com/sipemu/anofox-ml) **0.6** from crates.io. Install it with `INSTALL anofox_ml FROM community`, or from the zips below (unsigned; see [Installation](https://github.com/DataZooDE/anofox-ml#installation)). Try it in the browser: https://datazoode.github.io/anofox-ml/

@@ -1,0 +1,90 @@
+# name: test/sql/ml_catboost_features.test
+# description: CatBoost text and embedding features with ml_fit_with_features_agg (anofox-ml 0.6)
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# The class shows only in the text (a "good" or "bad" word) and in the
+# embedding (its sign); the numeric feature is noise.
+statement ok
+CREATE TABLE reviews AS
+SELECT i,
+       (hash(i, 'n') % 1000) / 1000.0 AS noise,
+       CASE WHEN i % 2 = 0 THEN 'pos' ELSE 'neg' END AS label,
+       CASE WHEN i % 2 = 0 THEN 'a really good product ' ELSE 'a really bad product ' END
+           || (['red', 'blue', 'green'])[i % 3 + 1] AS body,
+       [CASE WHEN i % 2 = 0 THEN 1.0 ELSE -1.0 END + (hash(i, 'e') % 100) / 500.0,
+        (hash(i, 'f') % 100) / 100.0] AS emb
+FROM range(400) t(i);
+
+statement ok
+CREATE TABLE models AS
+SELECT ml_fit_with_features_agg('CatBoostClassifier', label, [noise], [body], [], '{"iterations": 50}') AS text_only,
+       ml_fit_with_features_agg('CatBoostClassifier', label, [noise], [], [emb], '{"iterations": 50}') AS emb_only,
+       ml_fit_with_features_agg('CatBoostClassifier', label, [noise], [body], [emb], '{"iterations": 50}') AS text_emb,
+       ml_fit_with_features_agg('CatBoostRegressor', (i % 2)::DOUBLE, [noise], [], [emb], '{"iterations": 50}') AS reg
+FROM reviews WHERE i < 300;
+
+query III
+SELECT avg((ml_predict_label(text_only, [noise], [body], []) = label)::INT) > 0.9,
+       avg((ml_predict_label(emb_only, [noise], [], [emb]) = label)::INT) > 0.9,
+       avg((ml_predict_label(text_emb, [noise], [body], [emb]) = label)::INT) > 0.9
+FROM reviews, models WHERE i >= 300;
+----
+true	true	true
+
+query II
+SELECT bool_and(abs(list_sum(p) - 1) < 1e-9), bool_and(len(p) = 2)
+FROM (SELECT ml_predict_proba(text_emb, [noise], [body], [emb]) AS p FROM reviews, models WHERE i >= 300);
+----
+true	true
+
+query I
+SELECT avg(abs(ml_predict(reg, [noise], [], [emb]) - (i % 2))) < 0.2 FROM reviews, models WHERE i >= 300;
+----
+true
+
+# NULL text or embedding: NULL prediction
+query I
+SELECT ml_predict(reg, [noise], [], [[NULL, 1.0]]) IS NULL FROM reviews, models WHERE i = 300;
+----
+true
+
+query I
+SELECT ml_model_info(text_emb).kind FROM models;
+----
+CatBoostClassifier
+
+# the side inputs are required, and must match the fit
+statement error
+SELECT ml_predict_label(text_emb, [noise]) FROM reviews, models WHERE i = 300;
+----
+pass them
+
+statement error
+SELECT ml_predict_label(text_emb, [noise], [body], []) FROM reviews, models WHERE i = 300;
+----
+text columns and embeddings of widths
+
+statement error
+SELECT ml_predict((SELECT ml_fit_agg('OlsRegressor', i::DOUBLE, [noise]) FROM reviews), [noise], [body], []) FROM reviews;
+----
+without text or embedding columns
+
+statement error
+SELECT ml_fit_with_features_agg('OlsRegressor', i::DOUBLE, [noise], [body], []) FROM reviews;
+----
+fit_with_text
+
+statement error
+SELECT ml_fit_with_features_agg('CatBoostClassifier', label, [noise], [], []) FROM reviews;
+----
+no text or embedding columns
+
+statement error
+SELECT ml_fit_with_features_agg('CatBoostRegressor', i::DOUBLE, [noise], [], CASE WHEN i = 5 THEN [[1.0]] ELSE [emb] END) FROM reviews;
+----
+embedding widths

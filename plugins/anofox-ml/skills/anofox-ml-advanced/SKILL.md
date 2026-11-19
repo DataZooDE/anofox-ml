@@ -68,6 +68,7 @@ SELECT ml_predict(model, [1.0, 0.0, 3.0]) FROM (
 - **Uncertainty.** `GaussianProcessRegressor` (default kernel `1.0 * RBF(1.0)`): `ml_predict_std(model, x)` next to `ml_predict`.
 - **Learning to rank.** `ml_fit_with_group_agg(kind, relevance, [x…], query_id [, params [, weight]])` for `LgbmRanker` (LambdaRank) or the ranking objectives of `LgbmRegressor` / `CatBoostRegressor`; `ml_predict` gives scores, rank within a query by `row_number() OVER (PARTITION BY query_id ORDER BY score DESC)`.
 - **Pipelines.** `Pipeline` (`steps`: specs, transformers then an estimator), `FeatureUnion` (`transformer_list`), `ColumnTransformer` (`transformers`, `remainder`) and `SelectFromModel` are kinds like any other: one BLOB, `ml_predict` / `ml_transform` on the raw features.
+- **CatBoost text and embeddings.** `ml_fit_with_features_agg(kind, y, [x…], [text…], [embedding…] [, params [, weight]])` for `CatBoostRegressor` / `CatBoostClassifier`: text columns as `VARCHAR[]`, embedding vectors as `DOUBLE[][]` (either may be `[]`); predict with `ml_predict` / `ml_predict_label` / `ml_predict_proba(model, x, text, embeddings)`.
 - **CatBoost categories.** `CatBoostRegressor` / `CatBoostClassifier` take `cat_features` (0-based positions in the feature list) holding integer codes, e.g. `dense_rank() OVER (ORDER BY city) - 1`.
 
 ```sql

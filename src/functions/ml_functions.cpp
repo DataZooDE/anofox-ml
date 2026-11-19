@@ -2477,14 +2477,19 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         }
     }
     loader.RegisterFunction(rfe_set);
-    using SelectSpec = std::pair<const char *, aggregate_finalize_t>;
-    const SelectSpec selects[] = {{kLearningCurve, SelectFinalize<kLearningCurve>},
-                                  {kValidationCurve, SelectFinalize<kValidationCurve>},
-                                  {kPermutationTest, SelectFinalize<kPermutationTest>},
-                                  {kNestedCv, SelectFinalize<kNestedCv>},
-                                  {kBootstrapValidate, SelectFinalize<kBootstrapValidate>}};
+    struct SelectSpec {
+        const char *name; // the SQL function
+        const char *method;
+        aggregate_finalize_t finalize;
+    };
+    const SelectSpec selects[] = {
+        {"ml_learning_curve_agg", kLearningCurve, SelectFinalize<kLearningCurve>},
+        {"ml_validation_curve_agg", kValidationCurve, SelectFinalize<kValidationCurve>},
+        {"ml_permutation_test_agg", kPermutationTest, SelectFinalize<kPermutationTest>},
+        {"ml_nested_cv_agg", kNestedCv, SelectFinalize<kNestedCv>},
+        {"ml_bootstrap_validate_agg", kBootstrapValidate, SelectFinalize<kBootstrapValidate>}};
     for (const auto &spec : selects) {
-        const std::string name = std::string("ml_") + spec.first + "_agg";
+        const char *name = spec.name;
         AggregateFunctionSet set(name);
         for (bool labels : {false, true}) {
             for (idx_t extra = 0; extra <= 2; extra++) {
@@ -2493,9 +2498,9 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
                 for (idx_t e = 0; e < extra; e++) {
                     args.push_back(V); // params, options
                 }
-                AggregateFunction f(name, args, SelectType(spec.first), AggregateFunction::StateSize<FitState>,
+                AggregateFunction f(name, args, SelectType(spec.method), AggregateFunction::StateSize<FitState>,
                                     compat::StateInit<FitInitialize>, labels ? RfeUpdate<true> : RfeUpdate<false>,
-                                    FitCombine, spec.second, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+                                    FitCombine, spec.finalize, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
                 f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
                 set.AddFunction(f);
             }

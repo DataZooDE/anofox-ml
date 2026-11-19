@@ -21,6 +21,7 @@ mod encode;
 mod features;
 mod impute;
 mod inspect;
+mod interchange;
 mod metrics;
 mod select;
 mod stats;

@@ -276,6 +276,8 @@ The skills live in [`plugins/anofox-ml/`](plugins/anofox-ml/). For development, 
 | `ml_explained_variance_ratio(model)` | `DOUBLE[]` of PCA-like decompositions |
 | `ml_feature_importances(model)` | `DOUBLE[]`, one impurity-based importance per feature, summing to 1: decision trees, random forests, extra trees, gradient boosting, histogram gradient boosting, LGBM and bagging. For any model, see `ml_permutation_importance_agg` |
 | `ml_model_kind(model)` | The estimator kind stored in a model BLOB (without decoding the model) |
+| `ml_model_export(model)` | The model as anofox-ml's own bytes (`BLOB`, without this extension's header), for Rust: `anofox_ml_registry::load(kind, &bytes)` with `kind = ml_model_kind(model)`. Not for the VARCHAR encoders or conformalized models |
+| `ml_model_import(kind, bytes, n_features [, classes DOUBLE[] \| labels VARCHAR[]])` | A model BLOB from anofox-ml registry bytes (`DynModel::to_bytes` in Rust; read a file with `read_blob`). `n_features` is the model's input width; a classifier's classes are read from its fitted state where it lists them, otherwise pass them (string `labels` sorted: label `i` is class `i`) |
 | `ml_version()` | Version of the bundled anofox-ml FFI layer |
 
 ### Categorical Features

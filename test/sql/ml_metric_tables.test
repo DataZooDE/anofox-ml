@@ -1,0 +1,84 @@
+# name: test/sql/ml_metric_tables.test
+# description: confusion matrix, classification report, ROC and precision-recall curves
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+# sklearn: confusion_matrix([2, 0, 2, 2, 0, 1], [0, 0, 2, 2, 0, 2])
+statement ok
+CREATE TABLE p AS SELECT * FROM (VALUES (2, 0), (0, 0), (2, 2), (2, 2), (0, 0), (1, 2)) t(y, pred);
+
+query II
+SELECT cm.labels, cm.matrix FROM (SELECT ml_confusion_matrix(y::DOUBLE, pred::DOUBLE) AS cm FROM p);
+----
+[0, 1, 2]	[[2.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 2.0]]
+
+# labels option: rows and columns in that order
+query I
+SELECT ml_confusion_matrix(y::DOUBLE, pred::DOUBLE, '{"labels": [2, 0]}').matrix FROM p;
+----
+[[2.0, 1.0], [0.0, 2.0]]
+
+# string labels, sorted
+query II
+SELECT cm.labels, cm.matrix FROM (
+    SELECT ml_confusion_matrix(['a', 'b', 'c'][y + 1], ['a', 'b', 'c'][pred + 1]) AS cm FROM p);
+----
+[a, b, c]	[[2.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 2.0]]
+
+# sklearn classification_report: class 0 p=0.667 r=1.0, class 1 p=0 r=0, class 2 p=0.667 r=0.667
+query IIIII
+SELECT r.label, round(r.precision, 4), round(r.recall, 4), round(r.f1, 4), r.support
+FROM (SELECT unnest(ml_classification_report(['a', 'b', 'c'][y + 1], ['a', 'b', 'c'][pred + 1])) AS r FROM p);
+----
+a	0.6667	1.0	0.8	2.0
+b	0.0	0.0	0.0	1.0
+c	0.6667	0.6667	0.6667	3.0
+
+# weights count rows
+query I
+SELECT ml_classification_report(y::DOUBLE, pred::DOUBLE, '{}', 2.0)[3].support FROM p;
+----
+6.0
+
+# sklearn: roc_curve([0, 0, 1, 1], [0.1, 0.4, 0.35, 0.8], drop_intermediate=False)
+statement ok
+CREATE TABLE s AS SELECT * FROM (VALUES (0.0, 0.1), (0.0, 0.4), (1.0, 0.35), (1.0, 0.8)) t(y, score);
+
+query III
+SELECT r.threshold, r.fpr, r.tpr FROM (SELECT unnest(ml_roc_curve(y, score)) AS r FROM s);
+----
+1.8	0.0	0.0
+0.8	0.0	0.5
+0.4	0.5	0.5
+0.35	0.5	1.0
+0.1	1.0	1.0
+
+# sklearn: precision_recall_curve; the last point (1, 0) has no threshold
+query III
+SELECT r.threshold, round(r.precision, 4), r.recall FROM (SELECT unnest(ml_precision_recall_curve(y, score)) AS r FROM s);
+----
+0.1	0.5	1.0
+0.35	0.6667	1.0
+0.4	0.5	0.5
+0.8	1.0	0.5
+NULL	1.0	0.0
+
+# per group, and NULL for an empty group
+query II
+SELECT g, len(ml_roc_curve(y, score)) FROM (SELECT *, 1 AS g FROM s) GROUP BY g;
+----
+1	5
+
+query I
+SELECT ml_confusion_matrix(y::DOUBLE, pred::DOUBLE) IS NULL FROM p WHERE y > 5;
+----
+true
+
+statement error
+SELECT ml_roc_curve(y::DOUBLE, pred::DOUBLE) FROM p;
+----
+binary

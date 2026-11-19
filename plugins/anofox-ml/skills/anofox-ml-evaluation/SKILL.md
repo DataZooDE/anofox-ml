@@ -35,6 +35,7 @@ Aggregates over `(y_true, y_pred)`: they score any prediction column, per `GROUP
 | Scores / probabilities | `ml_roc_auc(y, score \| proba[])`, `ml_log_loss(y, proba[])`, `ml_brier_score(y, p)`, `ml_average_precision(y, score)` |
 | Clustering | `ml_adjusted_rand`, `ml_normalized_mutual_info`, `ml_silhouette(x DOUBLE[], label)` |
 | Intervals / quantiles | `ml_coverage(y, lower, upper)`, `ml_interval_score(y, lower, upper, alpha)`, `ml_mean_pinball_loss(y, q, alpha)` |
+| Tables | `ml_confusion_matrix(y, y_pred [, options [, weight]])` → `STRUCT(labels, matrix)`; `ml_classification_report(…)` → per-class `STRUCT(label, precision, recall, f1, support)`; `ml_roc_curve(y, score)` → `STRUCT(threshold, fpr, tpr)[]`; `ml_precision_recall_curve(y, score)` → `STRUCT(threshold, precision, recall)[]` (last point: NULL threshold) |
 
 For a binary model, `ml_predict_proba(model, x)[2]` is the probability of the second of `ml_model_info(model).classes` (the positive class for 0/1 targets).
 

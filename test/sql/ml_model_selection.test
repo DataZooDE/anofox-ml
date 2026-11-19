@@ -1,0 +1,86 @@
+# name: test/sql/ml_model_selection.test
+# description: learning / validation curves, permutation test, nested CV, bootstrap validation, bootstrap splits
+# group: [anofox_ml]
+
+require anofox_ml
+
+statement ok
+SET anofox_telemetry_enabled = false;
+
+statement ok
+CREATE TABLE t AS
+SELECT i, a, b, 2 * a - b + (hash(i, 'e') % 100) / 1000.0 AS y,
+       CASE WHEN 2 * a - b > 0.5 THEN 'yes' ELSE 'no' END AS label
+FROM (SELECT i, (hash(i, 'a') % 1000) / 1000.0 AS a, (hash(i, 'b') % 1000) / 1000.0 AS b FROM range(300) r(i));
+
+# learning curve: five training sizes, the test score improves to a near-perfect fit
+query IIII
+SELECT len(lc), lc[1].train_size < lc[5].train_size, lc[5].test_score > 0.95, lc[5].test_score >= lc[1].test_score
+FROM (SELECT ml_learning_curve_agg('OlsRegressor', y, [a, b]) AS lc FROM t);
+----
+5	true	true	true
+
+# 0.5 * 225 rows rounds up (scikit-learn truncates to 112: sipemu/anofox-ml#275)
+query I
+SELECT [x.train_size FOR x IN ml_learning_curve_agg('OlsRegressor', y, [a, b], '{}', '{"train_sizes": [0.5, 1.0], "cv": 4}')] FROM t;
+----
+[113, 225]
+
+# validation curve over a grid: one row per parameter set
+query III
+SELECT len(vc), vc[1].params, vc[3].test_score > vc[1].test_score
+FROM (SELECT ml_validation_curve_agg('DecisionTreeRegressor', y, [a, b], '{"seed": 1}',
+                                     '{"param_grid": {"max_depth": [1, 3, 6]}, "cv": 3}') AS vc FROM t);
+----
+3	{"max_depth":1}	true
+
+# permutation test: a real signal beats every permutation
+query III
+SELECT pt.p_value, len(pt.permutation_scores), pt.score > list_max(pt.permutation_scores)
+FROM (SELECT ml_permutation_test_agg('LogisticRegressor', label, [a, b], '{}', '{"n_permutations": 19}') AS pt FROM t);
+----
+0.05	19	true
+
+# nested CV: one chosen parameter set per outer fold
+query III
+SELECT len(n.folds), n.score > 0.8, list_distinct([f.params FOR f IN n.folds]) <@ ['{"max_depth":2}', '{"max_depth":5}']
+FROM (SELECT ml_nested_cv_agg('DecisionTreeClassifier', label, [a, b], '{"seed": 0}',
+                              '{"param_grid": [{"max_depth": 2}, {"max_depth": 5}], "cv": 4}') AS n FROM t);
+----
+4	true	true
+
+# bootstrap validation on the metric's scale: optimism lowers the apparent accuracy
+query III
+SELECT bv.apparent >= bv.optimism_corrected, bv.point632 BETWEEN 0 AND 1, bv.n_skipped
+FROM (SELECT ml_bootstrap_validate_agg('DecisionTreeClassifier', label, [a, b], '{"max_depth": 6, "seed": 0}',
+                                       '{"n_bootstraps": 25}') AS bv FROM t);
+----
+true	true	0
+
+query I
+SELECT bv.optimism_corrected >= bv.apparent
+FROM (SELECT ml_bootstrap_validate_agg('OlsRegressor', y, [a, b], '{}', '{"n_bootstraps": 25, "metric": "mse"}') AS bv FROM t);
+----
+true
+
+statement error
+SELECT ml_validation_curve_agg('OlsRegressor', y, [a, b]) FROM t;
+----
+param_grid
+
+statement error
+SELECT ml_learning_curve_agg('OlsRegressor', y, [a, b], '{}', '{"metric": "nope"}') FROM t;
+----
+unknown metric
+
+# bootstrap splits: n training draws per split (rows repeat), out-of-bag rows test
+query III
+SELECT count(*) FILTER (WHERE s.role = 'train'), count(DISTINCT s.id) FILTER (WHERE s.role = 'test') > 0, count(DISTINCT s.split)
+FROM (SELECT unnest(ml_cv_splits_agg(i, 'bootstrap', '{"n_splits": 3, "seed": 2}' ORDER BY i)) AS s FROM t);
+----
+900	true	3
+
+query I
+SELECT count(*) FROM (SELECT unnest(ml_cv_splits_agg(i, 'bootstrap_stratified', '{"n_splits": 2}', (label = 'yes')::DOUBLE ORDER BY i)) AS s FROM t) WHERE s.role = 'train';
+----
+600

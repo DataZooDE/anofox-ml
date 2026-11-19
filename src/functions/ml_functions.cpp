@@ -944,6 +944,136 @@ void RfeFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &resu
 }
 
 //===--------------------------------------------------------------------===//
+// ml_learning_curve_agg / ml_validation_curve_agg / ml_permutation_test_agg /
+// ml_nested_cv_agg / ml_bootstrap_validate_agg
+//   (kind VARCHAR, y DOUBLE | VARCHAR, x DOUBLE[] [, params VARCHAR [, options VARCHAR]])
+// Model selection by cross-validation or the bootstrap; the grid methods
+// take options.param_grid.
+//===--------------------------------------------------------------------===//
+LogicalType SelectType(const std::string &method) {
+    const auto D = LogicalType(LogicalTypeId::DOUBLE), V = LogicalType(LogicalTypeId::VARCHAR);
+    const auto BI = LogicalType(LogicalTypeId::BIGINT);
+    auto curve = [&](child_list_t<LogicalType> f) {
+        for (auto name : {"train_score", "train_score_std", "test_score", "test_score_std"}) {
+            f.emplace_back(name, D);
+        }
+        return LogicalType::LIST(LogicalType::STRUCT(std::move(f)));
+    };
+    if (method == "learning_curve") {
+        return curve({{"train_size", BI}});
+    }
+    if (method == "validation_curve") {
+        return curve({{"params", V}});
+    }
+    if (method == "permutation_test") {
+        return LogicalType::STRUCT({{"score", D}, {"p_value", D}, {"permutation_scores", LogicalType::LIST(D)}});
+    }
+    if (method == "nested_cv") {
+        auto fold = LogicalType::STRUCT({{"fold", BI}, {"score", D}, {"inner_score", D}, {"params", V}});
+        return LogicalType::STRUCT({{"score", D}, {"score_std", D}, {"folds", LogicalType::LIST(fold)}});
+    }
+    child_list_t<LogicalType> f;
+    for (auto name : {"apparent", "out_of_bag", "point632", "point632_plus", "optimism_corrected", "no_information",
+                      "relative_overfitting"}) {
+        f.emplace_back(name, D);
+    }
+    f.emplace_back("n_skipped", BI);
+    return LogicalType::STRUCT(std::move(f));
+}
+
+template <const char *METHOD>
+void SelectFinalize(Vector &state_vector, compat::FinalizeInput &aggr, Vector &result, idx_t count, idx_t offset) {
+    const std::string method = METHOD;
+    const std::string function = "ml_" + method + "_agg";
+    auto states = FlatVector::GetData<FitState *>(state_vector);
+    for (idx_t i = 0; i < count; i++) {
+        auto &s = *states[i];
+        idx_t row = i + offset;
+        if (!s.initialized || s.n_rows == 0) {
+            FlatVector::SetNull(result, row, true);
+            continue;
+        }
+        CaptureUse(function.c_str());
+        std::vector<const char *> labels;
+        for (const auto &l : *s.labels) {
+            labels.push_back(l.c_str());
+        }
+        AnofoxMlStrings texts {nullptr, 0};
+        AnofoxMlDoubles values {nullptr, 0};
+        size_t cols = 0;
+        Check(anofox_ml_select(METHOD, s.kind->c_str(), s.params->c_str(), s.options->c_str(), s.x->data(), s.n_rows,
+                               s.n_cols, s.has_labels ? nullptr : s.y->data(),
+                               s.has_labels ? labels.data() : nullptr, FitThreads(aggr), &texts, &values, &cols),
+              function.c_str());
+        const idx_t n = cols ? values.len / cols : 0;
+        auto v = [&](idx_t r, idx_t c) { return values.data[r * cols + c]; };
+        auto type = SelectType(method);
+        Value out;
+        if (method == "learning_curve" || method == "validation_curve") {
+            auto &fields = StructType::GetChildTypes(ListType::GetChildType(type));
+            vector<Value> rows;
+            for (idx_t r = 0; r < n; r++) {
+                child_list_t<Value> f;
+                idx_t c = 0;
+                if (method == "learning_curve") {
+                    f.emplace_back(fields[0].first, Value::BIGINT(static_cast<int64_t>(v(r, c++))));
+                } else {
+                    f.emplace_back(fields[0].first, Value(texts.data[r]));
+                }
+                for (; c < cols; c++) {
+                    f.emplace_back(fields[f.size()].first, Value::DOUBLE(v(r, c)));
+                }
+                rows.push_back(Value::STRUCT(std::move(f)));
+            }
+            out = Value::LIST(ListType::GetChildType(type), std::move(rows));
+        } else if (method == "permutation_test") {
+            vector<Value> perms;
+            for (idx_t c = 2; c < cols; c++) {
+                perms.push_back(Value::DOUBLE(v(0, c)));
+            }
+            out = Value::STRUCT({{"score", Value::DOUBLE(v(0, 0))},
+                                 {"p_value", Value::DOUBLE(v(0, 1))},
+                                 {"permutation_scores", Value::LIST(LogicalType(LogicalTypeId::DOUBLE), perms)}});
+        } else if (method == "nested_cv") {
+            vector<Value> folds;
+            double sum = 0, sq = 0;
+            for (idx_t r = 0; r < n; r++) {
+                sum += v(r, 0);
+                folds.push_back(Value::STRUCT({{"fold", Value::BIGINT(static_cast<int64_t>(r))},
+                                               {"score", Value::DOUBLE(v(r, 0))},
+                                               {"inner_score", Value::DOUBLE(v(r, 1))},
+                                               {"params", Value(texts.data[r])}}));
+            }
+            const double mean = n ? sum / n : 0;
+            for (idx_t r = 0; r < n; r++) {
+                sq += (v(r, 0) - mean) * (v(r, 0) - mean);
+            }
+            out = Value::STRUCT({{"score", Value::DOUBLE(mean)},
+                                 {"score_std", Value::DOUBLE(n ? std::sqrt(sq / n) : 0)},
+                                 {"folds", Value::LIST(ListType::GetChildType(StructType::GetChildType(type, 2)),
+                                                       std::move(folds))}});
+        } else {
+            child_list_t<Value> f;
+            auto &fields = StructType::GetChildTypes(type);
+            for (idx_t c = 0; c + 1 < cols; c++) {
+                f.emplace_back(fields[c].first, Value::DOUBLE(v(0, c)));
+            }
+            f.emplace_back("n_skipped", Value::BIGINT(static_cast<int64_t>(v(0, cols - 1))));
+            out = Value::STRUCT(std::move(f));
+        }
+        anofox_ml_free_strings(texts);
+        anofox_ml_free_doubles(values);
+        result.SetValue(row, out);
+    }
+}
+
+const char kLearningCurve[] = "learning_curve";
+const char kValidationCurve[] = "validation_curve";
+const char kPermutationTest[] = "permutation_test";
+const char kNestedCv[] = "nested_cv";
+const char kBootstrapValidate[] = "bootstrap_validate";
+
+//===--------------------------------------------------------------------===//
 // ml_cluster_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> BIGINT[]
 // ml_outlier_score_agg(kind VARCHAR, x DOUBLE[] [, params VARCHAR [, weight DOUBLE]]) -> DOUBLE[]
 // Fit on the group and return one value per input row, in input order (use
@@ -2347,6 +2477,31 @@ void RegisterMlFunctions(ExtensionLoader &loader) {
         }
     }
     loader.RegisterFunction(rfe_set);
+    using SelectSpec = std::pair<const char *, aggregate_finalize_t>;
+    const SelectSpec selects[] = {{kLearningCurve, SelectFinalize<kLearningCurve>},
+                                  {kValidationCurve, SelectFinalize<kValidationCurve>},
+                                  {kPermutationTest, SelectFinalize<kPermutationTest>},
+                                  {kNestedCv, SelectFinalize<kNestedCv>},
+                                  {kBootstrapValidate, SelectFinalize<kBootstrapValidate>}};
+    for (const auto &spec : selects) {
+        const std::string name = std::string("ml_") + spec.first + "_agg";
+        AggregateFunctionSet set(name);
+        for (bool labels : {false, true}) {
+            for (idx_t extra = 0; extra <= 2; extra++) {
+                vector<LogicalType> args {V, LogicalType(labels ? LogicalTypeId::VARCHAR : LogicalTypeId::DOUBLE),
+                                          features};
+                for (idx_t e = 0; e < extra; e++) {
+                    args.push_back(V); // params, options
+                }
+                AggregateFunction f(name, args, SelectType(spec.first), AggregateFunction::StateSize<FitState>,
+                                    compat::StateInit<FitInitialize>, labels ? RfeUpdate<true> : RfeUpdate<false>,
+                                    FitCombine, spec.second, nullptr, compat::AggregateBind<FitBind>, FitDestroy);
+                f.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+                set.AddFunction(f);
+            }
+        }
+        loader.RegisterFunction(set);
+    }
     // Categorical encoders on VARCHAR features.
     const auto string_features = LogicalType::LIST(V);
     fit_set.AddFunction(make_fit({V, string_features}, EncodeUpdate));

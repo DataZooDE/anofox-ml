@@ -348,6 +348,26 @@ FROM (SELECT store, ml_tune_agg('HistGradientBoostingRegressor', sales, [price, 
       FROM train GROUP BY store);
 ```
 
+### Model Selection
+
+Aggregates over the training rows of a group, `(kind, y, [x1, x2, …] [, params [, options]])` with a `DOUBLE` or `VARCHAR` target, matching scikit-learn's model-selection tools. They fit `kind` many times, so they are as slow as `cv` × the candidates. Common options: `cv` (5 folds, stratified for classifiers unless `"stratify": false`), `metric` (any metric aggregate name; default `accuracy` / `r2`; the probability metrics use a binary classifier's positive-class probability), `metric_options`, `seed`.
+
+| Function | Returns |
+|---|---|
+| `ml_learning_curve_agg` | `STRUCT(train_size, train_score, train_score_std, test_score, test_score_std)[]`, one per `train_sizes` fraction (default `[0.1, 0.325, 0.55, 0.775, 1.0]`) |
+| `ml_validation_curve_agg` | `STRUCT(params, train_score, train_score_std, test_score, test_score_std)[]`, one per parameter set of `options.param_grid`: a list of objects, or an object of value lists (their grid) |
+| `ml_permutation_test_agg` | `STRUCT(score, p_value, permutation_scores DOUBLE[])`: the CV score against `n_permutations` (100) shuffles of the target |
+| `ml_nested_cv_agg` | `STRUCT(score, score_std, folds STRUCT(fold, score, inner_score, params)[])`: a grid search (`param_grid`, `inner_cv` folds, default 3) inside each outer fold, scored on the outer test fold; `score` estimates the whole tuning procedure |
+| `ml_bootstrap_validate_agg` | `STRUCT(apparent, out_of_bag, point632, point632_plus, optimism_corrected, no_information, relative_overfitting, n_skipped)`: Efron's .632 / .632+ and Harrell's optimism-corrected estimates over `n_bootstraps` (200) resamples, on the metric's scale |
+
+```sql
+SELECT unnest(ml_validation_curve_agg('DecisionTreeRegressor', units, [price, promo, dow], '{"seed": 1}',
+                                      '{"param_grid": {"max_depth": [2, 4, 8]}, "metric": "rmse"}'), recursive := true)
+FROM train WHERE store = 'store_0';
+SELECT ml_bootstrap_validate_agg('LogisticRegressor', churned, [tenure, calls], '{}',
+                                 '{"n_bootstraps": 50, "metric": "roc_auc"}') AS validation FROM customers;
+```
+
 ### Conformal Prediction
 
 Two ways to get prediction intervals (regressors) and prediction sets (classifiers). Coverage is guaranteed to be at least `1 − alpha` when the calibration and new rows are exchangeable.
@@ -455,6 +475,7 @@ LIMIT 5;
 | `group_kfold`, `leave_one_group_out`, `leave_p_groups_out`, `group_shuffle_split` | `groups` | `n_splits`, `shuffle`, `seed`, `p`, `test_size` (0.2), `train_size` |
 | `group_time_series` | `groups` (time keys, in `ORDER BY` order) | as `time_series` |
 | `stratified_group_kfold` | `y`, `groups` | `n_splits`, `shuffle`, `seed` |
+| `bootstrap`, `bootstrap_stratified` | — / `y` | `n_splits` (100), `seed`. Training rows are drawn with replacement, so a row repeats once per draw; the out-of-bag rows are the test rows |
 
 Pass `NULL` for `y` when a method only needs `groups`. Rows with a NULL id, or without the `y` / group the method needs, are left out.
 

@@ -24,6 +24,7 @@ mod inspect;
 mod interchange;
 mod metrics;
 mod select;
+mod selection;
 mod stats;
 mod text;
 mod tpe;

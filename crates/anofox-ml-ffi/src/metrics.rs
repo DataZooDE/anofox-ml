@@ -750,7 +750,10 @@ mod tests {
         // with drop_intermediate=False; precision_recall_curve ends at (1, 0)
         let (yt, s) = (array![0.0, 0.0, 1.0, 1.0], array![0.1, 0.4, 0.35, 0.8]);
         let t = table_metric("roc_curve", "", yt.clone(), s.clone(), None).unwrap();
-        assert_eq!((t.values.len() / 3, t.values[1], t.values[2]), (5, 0.0, 0.0));
+        assert_eq!(
+            (t.values.len() / 3, t.values[1], t.values[2]),
+            (5, 0.0, 0.0)
+        );
         let t = table_metric("precision_recall_curve", "", yt, s, None).unwrap();
         let last = &t.values[t.values.len() - 3..];
         assert!(last[0].is_nan() && last[1] == 1.0 && last[2] == 0.0);

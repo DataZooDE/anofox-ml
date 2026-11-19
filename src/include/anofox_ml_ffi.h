@@ -201,6 +201,29 @@ char *anofox_ml_fit_offset(const char *kind, const char *params, const double *x
 char *anofox_ml_fit_group(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
                           const double *y, const double *w, const double *group, size_t threads, AnofoxMlBytes *out);
 
+// anofox_ml_fit with text and embedding columns besides x (CatBoost's
+// text_features / embedding_features). y holds n_rows doubles, or (y NULL)
+// labels holds n_rows string targets; text holds n_rows * n_text strings,
+// row-major; emb holds n_rows * sum(dims) doubles, row-major, a row's
+// embedding columns one after the other; dims holds the n_emb widths.
+char *anofox_ml_fit_features(const char *kind, const char *params, const double *x, size_t n_rows, size_t n_cols,
+                             const double *y, const char *const *labels, const double *w, const char *const *text,
+                             size_t n_text, const double *emb, const size_t *dims, size_t n_emb, size_t threads,
+                             AnofoxMlBytes *out);
+
+// Apply `method` (predict or predict_proba) of a model fitted with
+// anofox_ml_fit_features to n_rows rows of x with their text and embedding
+// columns (laid out as for the fit); `out` receives n_rows * out_cols doubles.
+char *anofox_ml_apply_features(const uint8_t *model, size_t model_len, const char *method, const double *x,
+                               size_t n_rows, size_t n_cols, const char *const *text, size_t n_text,
+                               const double *emb, const size_t *dims, size_t n_emb, AnofoxMlDoubles *out,
+                               size_t *out_cols);
+
+// anofox_ml_apply_features with predict, returning class labels as strings.
+char *anofox_ml_predict_labels_features(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,
+                                        size_t n_cols, const char *const *text, size_t n_text, const double *emb,
+                                        const size_t *dims, size_t n_emb, AnofoxMlStrings *out);
+
 // Predict n_rows rows of x with an offset per row on the link scale (the
 // GLMs); `out` receives n_rows doubles.
 char *anofox_ml_predict_offset(const uint8_t *model, size_t model_len, const double *x, size_t n_rows,

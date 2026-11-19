@@ -207,6 +207,7 @@ pub unsafe extern "C" fn anofox_ml_fit_encoder(
             conformity: None,
             encoder: Some(e),
             y_columns: None,
+            side: None,
         };
         Ok(encode(&meta, &[]))
     };

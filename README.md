@@ -242,6 +242,7 @@ The skills live in [`plugins/anofox-ml/`](plugins/anofox-ml/). For development, 
 | `ml_fit_with_validation_agg(kind, y, [x1, x2, …], is_validation [, params [, weight]])` | `ml_fit_agg` with an explicit validation set: rows with `is_validation = true` are the validation set of early stopping (HistGradientBoosting with `"early_stopping": "Enabled"`), the others train |
 | `ml_fit_with_offset_agg(kind, y, [x1, x2, …], offset [, params [, weight]])` | `ml_fit_agg` for the GLMs with an offset per row on the link scale, e.g. `ln(exposure)` for counts: `PoissonRegressor`, `GammaRegressor`, `TweedieRegressor` and `BinomialRegressor` (proportions `y`, trial counts as `weight`). Rows with a NULL offset are skipped |
 | `ml_fit_with_group_agg(kind, y, [x1, x2, …], query [, params [, weight]])` | Learning to rank: `query` is a numeric query id per row (`dense_rank()` for strings), and `y` the relevance. For `LgbmRanker` (LambdaRank), and the ranking objectives of `LgbmRegressor` / `CatBoostRegressor`. A query's rows need not be consecutive; `ml_predict` gives the ranking scores |
+| `ml_fit_with_features_agg(kind, y, [x1, x2, …], [text1, …], [emb1, …] [, params [, weight]])` | CatBoost text and embedding features besides the numeric ones (`CatBoostRegressor`, `CatBoostClassifier`): a `VARCHAR[]` of text columns and a `DOUBLE[][]` of embedding vectors per row, either may be `[]`. Predict with the same columns: `ml_predict` / `ml_predict_label` / `ml_predict_proba(model, x, text, embeddings)` |
 | `ml_fit_agg(kind, [x1, x2, …] [, params [, weight]])` | The same without a target, for unsupervised estimators (scalers, PCA, clustering, …), and for the kinds fitted on `[X \| Y]` with `y_columns` (`MultiOutputRegressor`, `RegressorChain`, `MultiTask*`, `Cca`, `PlsCanonical`, `PlsSvd`): pass `list_concat(x, y)`; the model then takes `X` alone |
 | `ml_predict(model, [x1, x2, …])` | Predict with a model BLOB (`DOUBLE`; the label index for string labels) |
 | `ml_predict(model, [x1, x2, …], offset)` | GLM prediction with an offset on the link scale (a model from `ml_fit_with_offset_agg`); `ml_predict(model, x)` predicts at offset 0 |
@@ -647,6 +648,20 @@ CREATE TABLE ranker AS
 SELECT ml_fit_with_group_agg('LgbmRanker', relevance, [x1, x2], query_id, '{"n_estimators": 50}') AS m FROM search_log;
 SELECT query_id, row_number() OVER (PARTITION BY query_id ORDER BY ml_predict(m, [x1, x2]) DESC) AS position, x1, x2
 FROM search_log, ranker ORDER BY query_id, position LIMIT 10;
+```
+
+**Text and embeddings with CatBoost.** `ml_fit_with_features_agg` adds text columns (bag of words with naive Bayes / BM25 estimators) and embedding vectors (LDA / kNN) next to the numeric features; predictions take the same columns:
+
+```sql
+CREATE TABLE tickets AS
+SELECT i, (i % 7)::DOUBLE AS hour, CASE WHEN i % 2 = 0 THEN 'billing' ELSE 'outage' END AS topic,
+       CASE WHEN i % 2 = 0 THEN 'invoice charged twice' ELSE 'site is down again' END AS body,
+       [CASE WHEN i % 2 = 0 THEN 1.0 ELSE -1.0 END, (i % 5) / 5.0] AS emb
+FROM range(200) t(i);
+CREATE TABLE m AS
+SELECT ml_fit_with_features_agg('CatBoostClassifier', topic, [hour], [body], [emb], '{"iterations": 30}') AS model
+FROM tickets;
+SELECT topic, ml_predict_label(model, [hour], [body], [emb]) AS predicted FROM tickets, m LIMIT 4;
 ```
 
 **Pipelines.** `Pipeline` chains transformers and a final estimator into one model (`steps`, as `{estimator, estimator_params}` specs); `FeatureUnion` concatenates transformers' outputs and `ColumnTransformer` applies them to column subsets:
